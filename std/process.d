@@ -349,6 +349,7 @@ version (Posix) private enum InternalError : ubyte
     getrlimit,
     sysconf,
     doubleFork,
+    pthread_sigmask,
 }
 
 /*
@@ -608,7 +609,9 @@ private Pid spawnProcessImpl(scope const(char[])[] args,
                     if (argv.stderrFD > STDERR_FILENO)  close(argv.stderrFD);
                 }
 
-                sigprocmask(SIG_SETMASK, &argv.oldmask, null);
+                int rc = pthread_sigmask(SIG_SETMASK, &argv.oldmask, null);
+                if (rc != 0)
+                    abortOnError(argv.forkPipeOut, InternalError.pthread_sigmask, rc);
 
                 // Execute program.
                 core.sys.posix.unistd.execve(argv.argz[0], argv.argz.ptr, argv.envz);
@@ -619,8 +622,12 @@ private Pid spawnProcessImpl(scope const(char[])[] args,
 
             sigset_t all = void;
             sigset_t oldmask = void;
-            sigfillset(&all);
-            pthread_sigmask(SIG_SETMASK, &all, &oldmask);
+            int rc = sigfillset(&all);
+            if (rc < 0)
+                throw ProcessException.newFromErrno("Failed sigfillset()");
+            rc = pthread_sigmask(SIG_SETMASK, &all, &oldmask);
+            if (rc != 0)
+                throw new ProcessException(text("Failed pthread_sigmask(): ", rc));
 
             clone_args cArgs;
             cArgs.config = config;
@@ -636,7 +643,9 @@ private Pid spawnProcessImpl(scope const(char[])[] args,
             id = clone(&cloneChild, stack + stackSize, CLONE_VM | CLONE_VFORK | SIGCHLD,
                        cast(void*)&cArgs);
 
-            pthread_sigmask(SIG_SETMASK, &oldmask, null);
+            rc = pthread_sigmask(SIG_SETMASK, &oldmask, null);
+            if (rc != 0)
+                throw new ProcessException(text("Failed pthread_sigmask(): ", rc));
 
             munmap(stack, stackSize);
             assert(id != 0);
@@ -838,6 +847,9 @@ private Pid spawnProcessImpl(scope const(char[])[] args,
                     break;
                 case InternalError.sysconf:
                     errorMsg = "sysconf failed";
+                    break;
+                case InternalError.pthread_sigmask:
+                    errorMsg = "pthread_sigmask failed";
                     break;
                 case InternalError.noerror:
                     assert(false);
