@@ -503,7 +503,7 @@ private Pid spawnProcessImpl(scope const(char[])[] args,
             if (stack == MAP_FAILED)
                 throw ProcessException.newFromErrno("Failed to allocate child stack");
 
-            extern (C) int cloneChild(void* arguments) nothrow @nogc
+            extern (C) static int cloneChild(void* arguments) nothrow @nogc
             {
                 auto argv = cast(clone_args*) arguments;
 
@@ -647,7 +647,9 @@ private Pid spawnProcessImpl(scope const(char[])[] args,
             if (rc != 0)
                 throw new ProcessException(text("Failed pthread_sigmask(): ", rc));
 
-            munmap(stack, stackSize);
+            rc = munmap(stack, stackSize);
+            if (rc != 0)
+                throw ProcessException.newFromErrno("Failed munmap()");
             assert(id != 0);
         }
         else
