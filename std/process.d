@@ -471,11 +471,9 @@ private Pid spawnProcessImpl(scope const(char[])[] args,
     {
         if (!(config & Config.detached) && workDirFD < 0)
         {
-            import core.sys.linux.sched : clone, CLONE_VM;
+            import core.sys.linux.sched : clone, CLONE_VFORK, CLONE_VM;
             import core.sys.linux.sys.mman : mmap, munmap, MAP_PRIVATE, MAP_ANONYMOUS,
                 MAP_STACK, MAP_FAILED, PROT_READ, PROT_WRITE;
-
-            enum CLONE_VFORK = 0x4000; // TODO: Add to druntime.
 
             struct clone_args
             {
