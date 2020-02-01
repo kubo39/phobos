@@ -865,6 +865,7 @@ private Pid spawnProcessImpl(scope const(char[])[] args,
                     break;
                 case InternalError.malloc:
                     errorMsg = "Failed to allocate memory";
+                    break;
                 case InternalError.noerror:
                     assert(false);
             }
