@@ -469,7 +469,14 @@ private Pid spawnProcessImpl(scope const(char[])[] args,
     pid_t id;
     version (USE_CLONE)
     {
-        if (!(config & Config.detached) && workDirFD < 0)
+        auto ruid = core.sys.posix.unistd.getuid();
+        auto euid = core.sys.posix.unistd.geteuid();
+
+        if (!(config & Config.detached)
+            && euid != 0
+            && ruid == euid
+            && core.sys.posix.unistd.getgid() == core.sys.posix.unistd.getegid()
+            && workDirFD < 0)
         {
             import core.sys.linux.sched : clone, CLONE_VFORK, CLONE_VM;
             import core.sys.linux.sys.mman : mmap, munmap, MAP_PRIVATE, MAP_ANONYMOUS,
