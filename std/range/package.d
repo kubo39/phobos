@@ -233,6 +233,7 @@ public import std.range.interfaces;
 public import std.range.primitives;
 public import std.typecons : Flag, Yes, No;
 
+import std.internal.attributes : betterC;
 import std.meta : allSatisfy, staticMap;
 import std.traits : CommonType, isCallable, isFloatingPoint, isIntegral,
     isPointer, isSomeFunction, isStaticArray, Unqual, isInstanceOf;
@@ -1392,7 +1393,8 @@ pure @safe nothrow @nogc unittest
 pure @safe unittest // issue 18657
 {
     import std.algorithm.comparison : equal;
-    auto r = refRange(&["foo"][0]).chain("bar");
+    string s = "foo";
+    auto r = refRange(&s).chain("bar");
     assert(equal(r.save, "foobar"));
     assert(equal(r, "foobar"));
 }
@@ -1498,13 +1500,25 @@ private struct ChooseResult(R1, R2)
         }
     }
 
-    void opAssign(return scope ChooseResult r) @trusted
+    void opAssign(ChooseResult r)
     {
+        static if (hasElaborateDestructor!R1 || hasElaborateDestructor!R2)
+            if (r1Chosen != r.r1Chosen)
+            {
+                // destroy the current item
+                actOnChosen!((ref r) => destroy(r))(this);
+            }
         r1Chosen = r.r1Chosen;
         if (r1Chosen)
-            r1 = r.r1;  // assigning to union members is @system
+        {
+            ref get1(return ref ChooseResult r) @trusted { return r.r1; }
+            get1(this) = get1(r);
+        }
         else
-            r2 = r.r2;
+        {
+            ref get2(return ref ChooseResult r) @trusted { return r.r2; }
+            get2(this) = get2(r);
+        }
     }
 
     // Carefully defined postblit to postblit the appropriate range
@@ -1544,37 +1558,17 @@ private struct ChooseResult(R1, R2)
     }
 
     static if (isForwardRange!R1 && isForwardRange!R2)
+    @property auto save() return scope
     {
-        private auto systemSave() return scope
+        if (r1Chosen)
         {
-            return r1Chosen
-                ? ChooseResult(r1Chosen, r1.save, r2)
-                : ChooseResult(r1Chosen, r1, r2.save);
+            ref R1 getR1() @trusted { return r1; }
+            return ChooseResult(r1Chosen, getR1.save, R2.init);
         }
-        private auto trustedSave()() @trusted return scope
+        else
         {
-            /*
-            Unsafe operations in this function:
-            - copying r1/r2 (postblit or copy constructor),
-            - r1.save/r2.save,
-            - accessing the union of r1 and r2.
-            The first two cannot be trusted, because they involve calling user
-            code. So they're only called via @safe wrappers.
-            The last one can be trusted. We're not returning a reference into
-            the union.
-            */
-            R safeSave(R)(ref R r) @safe { return r.save; }
-            R safeCopy(R)(ref R r) @safe { return r; }
-            return r1Chosen
-                ? ChooseResult(r1Chosen, safeSave(r1), safeCopy(r2))
-                : ChooseResult(r1Chosen, safeCopy(r1), safeSave(r2));
-        }
-        @property auto save() return scope
-        {
-            static if (__traits(compiles, trustedSave()))
-                return trustedSave();
-            else
-                return systemSave();
+            ref R2 getR2() @trusted { return r2; }
+            return ChooseResult(r1Chosen, R1.init, getR2.save);
         }
     }
 
@@ -1665,7 +1659,8 @@ private struct ChooseResult(R1, R2)
 pure @safe unittest // issue 18657
 {
     import std.algorithm.comparison : equal;
-    auto r = choose(true, refRange(&["foo"][0]), "bar");
+    string s = "foo";
+    auto r = choose(true, refRange(&s), "bar");
     assert(equal(r.save, "foo"));
     assert(equal(r, "foo"));
 }
@@ -1740,6 +1735,52 @@ pure @safe unittest // issue 18657
     static assert(!__traits(compiles, choose(true, R(), R()).save));
     static assert(!__traits(compiles, choose(true, [0], R()).save));
     static assert(!__traits(compiles, choose(true, R(), [0]).save));
+}
+//https://issues.dlang.org/show_bug.cgi?id=19738
+@safe nothrow pure @nogc unittest
+{
+    static struct EvilRange
+    {
+        enum empty = true;
+        int front;
+        void popFront() @safe {}
+        auto opAssign(const ref EvilRange other)
+        {
+            *(cast(uint*) 0xcafebabe) = 0xdeadbeef;
+            return this;
+        }
+    }
+
+    static assert(!__traits(compiles, () @safe
+    {
+        auto c1 = choose(true, EvilRange(), EvilRange());
+        auto c2 = c1;
+        c1 = c2;
+    }));
+}
+
+
+@safe unittest // issue 20495
+{
+    static struct KillableRange
+    {
+        int *item;
+        ref int front() { return *item; }
+        bool empty() { return *item > 10; }
+        void popFront() { ++(*item); }
+        this(this)
+        {
+            assert(item is null || cast(size_t) item > 1000);
+            item = new int(*item);
+        }
+        KillableRange save() { return this; }
+    }
+
+    auto kr = KillableRange(new int(1));
+    int[] x = [1,2,3,4,5]; // length is first
+
+    auto chosen = choose(true, x, kr);
+    auto chosen2 = chosen.save;
 }
 
 /**
@@ -2037,7 +2078,8 @@ if (Rs.length > 1 && allSatisfy!(isInputRange, staticMap!(Unqual, Rs)))
 pure @safe unittest
 {
     import std.algorithm.comparison : equal;
-    auto r = roundRobin(refRange(&["foo"][0]), refRange(&["bar"][0]));
+    string f = "foo", b = "bar";
+    auto r = roundRobin(refRange(&f), refRange(&b));
     assert(equal(r.save, "fboaor"));
     assert(equal(r.save, "fboaor"));
 }
@@ -3296,13 +3338,6 @@ if (isInputRange!R)
     range.popFrontN(n);
     return range;
 }
-/// ditto
-R dropBack(R)(R range, size_t n)
-if (isBidirectionalRange!R)
-{
-    range.popBackN(n);
-    return range;
-}
 
 ///
 @safe unittest
@@ -3315,6 +3350,15 @@ if (isBidirectionalRange!R)
     assert("hello world".take(6).drop(3).equal("lo "));
 }
 
+/// ditto
+R dropBack(R)(R range, size_t n)
+if (isBidirectionalRange!R)
+{
+    range.popBackN(n);
+    return range;
+}
+
+///
 @safe unittest
 {
     import std.algorithm.comparison : equal;
@@ -4268,7 +4312,8 @@ if (isStaticArray!R)
 pure @safe unittest // issue 18657
 {
     import std.algorithm.comparison : equal;
-    auto r = refRange(&["foo"][0]).cycle.take(4);
+    string s = "foo";
+    auto r = refRange(&s).cycle.take(4);
     assert(equal(r.save, "foof"));
     assert(equal(r.save, "foof"));
 }
@@ -9879,7 +9924,7 @@ Returns:
 
 See_Also: $(LREF chain) to chain ranges
  */
-auto only(Values...)(return scope auto ref Values values)
+auto only(Values...)(return scope Values values)
 if (!is(CommonType!Values == void) || Values.length == 0)
 {
     return OnlyResult!(CommonType!Values, Values.length)(values);
@@ -9915,6 +9960,16 @@ if (!is(CommonType!Values == void) || Values.length == 0)
 
     static assert(is(typeof(only((const(char)[]).init, string.init)) ==
         typeof(only((const(char)[]).init, (const(char)[]).init))));
+}
+
+// https://issues.dlang.org/show_bug.cgi?id=20314
+@safe unittest
+{
+    import std.algorithm.iteration : joiner;
+
+    const string s = "foo", t = "bar";
+
+    assert([only(s, t), only(t, s)].joiner(only(", ")).join == "foobar, barfoo");
 }
 
 // Tests the zero-element result
@@ -10163,7 +10218,7 @@ do
         private:
         alias ElemType = Tuple!(Enumerator, "index", ElementType!Range, "value");
         Range range;
-        Enumerator index;
+        Unqual!Enumerator index;
 
         public:
         ElemType front() @property
@@ -10270,6 +10325,14 @@ pure @safe nothrow unittest
     assert(aa[-1]);
     assert(aa[0]);
     assert(aa[1]);
+}
+
+// Make sure passing qualified types works
+pure @safe nothrow unittest
+{
+    char[4] v;
+    immutable start = 2;
+    v[2 .. $].enumerate(start);
 }
 
 pure @safe nothrow unittest
@@ -10552,16 +10615,56 @@ enum SearchPolicy
 }
 
 /**
-Represents a sorted range. In addition to the regular range
-primitives, supports additional operations that take advantage of the
-ordering, such as merge and binary search. To obtain a $(D
-SortedRange) from an unsorted range `r`, use
-$(REF sort, std,algorithm,sorting) which sorts `r` in place and returns the
-corresponding `SortedRange`. To construct a `SortedRange` from a range
-`r` that is known to be already sorted, use $(LREF assumeSorted) described
-below.
+   Options for $(LREF SortedRange) ranges (below).
 */
-struct SortedRange(Range, alias pred = "a < b")
+enum SortedRangeOptions
+{
+   /**
+      Assume, that the range is sorted without checking.
+   */
+   assumeSorted,
+
+   /**
+      All elements of the range are checked to be sorted.
+      The check is performed in O(n) time.
+   */
+   checkStrictly,
+
+   /**
+      Some elements of the range are checked to be sorted.
+      For ranges with random order, this will almost surely
+      detect, that it is not sorted. For almost sorted ranges
+      it's more likely to fail. The checked elements are choosen
+      in a deterministic manner, which makes this check reproducable.
+      The check is performed in O(log(n)) time.
+   */
+   checkRoughly,
+}
+
+///
+@safe pure unittest
+{
+    // create a SortedRange, that's checked strictly
+    SortedRange!(int[],"a < b", SortedRangeOptions.checkStrictly)([ 1, 3, 5, 7, 9 ]);
+}
+
+/**
+   Represents a sorted range. In addition to the regular range
+   primitives, supports additional operations that take advantage of the
+   ordering, such as merge and binary search. To obtain a $(D
+   SortedRange) from an unsorted range `r`, use
+   $(REF sort, std,algorithm,sorting) which sorts `r` in place and returns the
+   corresponding `SortedRange`. To construct a `SortedRange` from a range
+   `r` that is known to be already sorted, use $(LREF assumeSorted).
+
+   Params:
+       pred: The predicate used to define the sortedness
+       opt: Controls how strongly the range is checked for sortedness.
+            Will only be used for `RandomAccessRanges`.
+            Will not be used in CTFE.
+*/
+struct SortedRange(Range, alias pred = "a < b",
+    SortedRangeOptions opt = SortedRangeOptions.assumeSorted)
 if (isInputRange!Range && !isInstanceOf!(SortedRange, Range))
 {
     import std.functional : binaryFun;
@@ -10580,36 +10683,55 @@ if (isInputRange!Range && !isInstanceOf!(SortedRange, Range))
     // Undocummented because a clearer way to invoke is by calling
     // assumeSorted.
     this(Range input)
-    out
     {
-        // moved out of the body as a workaround for Issue 12661
-        dbgVerifySorted();
-    }
-    do
-    {
+        static if (opt == SortedRangeOptions.checkRoughly)
+        {
+            roughlyVerifySorted(input);
+        }
+        static if (opt == SortedRangeOptions.checkStrictly)
+        {
+            strictlyVerifySorted(input);
+        }
         this._input = input;
     }
 
     // Assertion only.
-    private void dbgVerifySorted()
+    static if (opt == SortedRangeOptions.checkRoughly)
+    private void roughlyVerifySorted(Range r)
     {
         if (!__ctfe)
-        debug
         {
             static if (isRandomAccessRange!Range && hasLength!Range)
             {
                 import core.bitop : bsr;
                 import std.algorithm.sorting : isSorted;
+                import std.exception : enforce;
 
                 // Check the sortedness of the input
-                if (this._input.length < 2) return;
+                if (r.length < 2) return;
 
-                immutable size_t msb = bsr(this._input.length) + 1;
-                assert(msb > 0 && msb <= this._input.length);
-                immutable step = this._input.length / msb;
-                auto st = stride(this._input, step);
+                immutable size_t msb = bsr(r.length) + 1;
+                assert(msb > 0 && msb <= r.length);
+                immutable step = r.length / msb;
+                auto st = stride(r, step);
 
-                assert(isSorted!pred(st), "Range is not sorted");
+                enforce(isSorted!pred(st), "Range is not sorted");
+            }
+        }
+    }
+
+    // Assertion only.
+    static if (opt == SortedRangeOptions.checkStrictly)
+    private void strictlyVerifySorted(Range r)
+    {
+        if (!__ctfe)
+        {
+            static if (isRandomAccessRange!Range && hasLength!Range)
+            {
+                import std.algorithm.sorting : isSorted;
+                import std.exception : enforce;
+
+                enforce(isSorted!pred(r), "Range is not sorted");
             }
         }
     }
@@ -11013,11 +11135,12 @@ sorting relation.
 }
 
 /// ditto
-template SortedRange(Range, alias pred = "a < b")
+template SortedRange(Range, alias pred = "a < b",
+                     SortedRangeOptions opt = SortedRangeOptions.assumeSorted)
 if (isInstanceOf!(SortedRange, Range))
 {
     // Avoid nesting SortedRange types (see Issue 18933);
-    alias SortedRange = SortedRange!(Unqual!(typeof(Range._input)), pred);
+    alias SortedRange = SortedRange!(Unqual!(typeof(Range._input)), pred, opt);
 }
 
 ///
@@ -11051,6 +11174,18 @@ that break its sorted-ness, `SortedRange` will work erratically.
     assert(r.contains(42));
     swap(a[3], a[5]);         // illegal to break sortedness of original range
     assert(!r.contains(42));  // passes although it shouldn't
+}
+
+@safe unittest
+{
+    import std.exception : assertThrown, assertNotThrown;
+
+    assertNotThrown(SortedRange!(int[])([ 1, 3, 10, 5, 7 ]));
+    assertThrown(SortedRange!(int[],"a < b", SortedRangeOptions.checkStrictly)([ 1, 3, 10, 5, 7 ]));
+
+    // these two checks are implementation depended
+    assertNotThrown(SortedRange!(int[],"a < b", SortedRangeOptions.checkRoughly)([ 1, 3, 10, 5, 12, 2 ]));
+    assertThrown(SortedRange!(int[],"a < b", SortedRangeOptions.checkRoughly)([ 1, 3, 10, 5, 2, 12 ]));
 }
 
 @safe unittest
@@ -11141,9 +11276,9 @@ that break its sorted-ness, `SortedRange` will work erratically.
     assert(!r.contains(42));            // passes although it shouldn't
 }
 
-@safe unittest
+@betterC @nogc nothrow @safe unittest
 {
-    immutable(int)[] arr = [ 1, 2, 3 ];
+    static immutable(int)[] arr = [ 1, 2, 3 ];
     auto s = assumeSorted(arr);
 }
 
@@ -11187,15 +11322,8 @@ that break its sorted-ness, `SortedRange` will work erratically.
 
 /**
 Assumes `r` is sorted by predicate `pred` and returns the
-corresponding $(D SortedRange!(pred, R)) having `r` as support. To
-keep the checking costs low, the cost is $(BIGOH 1) in release mode
-(no checks for sorted-ness are performed). In debug mode, a few random
-elements of `r` are checked for sorted-ness. The size of the sample
-is proportional $(BIGOH log(r.length)). That way, checking has no
-effect on the complexity of subsequent operations specific to sorted
-ranges (such as binary search). The probability of an arbitrary
-unsorted range failing the test is very high (however, an
-almost-sorted range is likely to pass it). To check for sorted-ness at
+corresponding $(D SortedRange!(pred, R)) having `r` as support.
+To check for sorted-ness at
 cost $(BIGOH n), use $(REF isSorted, std,algorithm,sorting).
  */
 auto assumeSorted(alias pred = "a < b", R)(R r)
@@ -11285,20 +11413,6 @@ if (isInputRange!(Unqual!R))
     r = assumeSorted(a);
     a = [ 1 ];
     r = assumeSorted(a);
-}
-
-@system unittest
-{
-    bool ok = true;
-    try
-    {
-        auto r2 = assumeSorted([ 677, 345, 34, 7, 5 ]);
-        debug ok = false;
-    }
-    catch (Throwable)
-    {
-    }
-    assert(ok);
 }
 
 // issue 15003
@@ -12260,7 +12374,7 @@ public:
         {
             immutable size_t remainingBits = bitsNum - maskPos + 1;
             // If n >= maskPos, then the bit sign will be 1, otherwise 0
-            immutable sizediff_t sign = (remainingBits - n - 1) >> (sizediff_t.sizeof * 8 - 1);
+            immutable ptrdiff_t sign = (remainingBits - n - 1) >> (ptrdiff_t.sizeof * 8 - 1);
             /*
                By truncating n with remainingBits bits we have skipped the
                remaining bits in parent[0], so we need to add 1 to elemIndex.
@@ -12300,7 +12414,7 @@ public:
                 import core.bitop : bsf;
 
                 immutable size_t remainingBits = bitsNum - maskPos + 1;
-                immutable sizediff_t sign = (remainingBits - n - 1) >> (sizediff_t.sizeof * 8 - 1);
+                immutable ptrdiff_t sign = (remainingBits - n - 1) >> (ptrdiff_t.sizeof * 8 - 1);
                 immutable size_t elemIndex = sign * (((n - remainingBits) >> bitsNum.bsf) + 1);
                 immutable size_t elemMaskPos = (sign ^ 1) * (maskPos + n)
                     + sign * (1 + ((n - remainingBits) & (bitsNum - 1)));
@@ -12327,14 +12441,14 @@ public:
             import core.bitop : bsf;
 
             size_t remainingBits = bitsNum - maskPos + 1;
-            sizediff_t sign = (remainingBits - start - 1) >> (sizediff_t.sizeof * 8 - 1);
+            ptrdiff_t sign = (remainingBits - start - 1) >> (ptrdiff_t.sizeof * 8 - 1);
             immutable size_t startElemIndex = sign * (((start - remainingBits) >> bitsNum.bsf) + 1);
             immutable size_t startElemMaskPos = (sign ^ 1) * (maskPos + start)
                                               + sign * (1 + ((start - remainingBits) & (bitsNum - 1)));
 
             immutable size_t sliceLen = end - start - 1;
             remainingBits = bitsNum - startElemMaskPos + 1;
-            sign = (remainingBits - sliceLen - 1) >> (sizediff_t.sizeof * 8 - 1);
+            sign = (remainingBits - sliceLen - 1) >> (ptrdiff_t.sizeof * 8 - 1);
             immutable size_t endElemIndex = startElemIndex
                                           + sign * (((sliceLen - remainingBits) >> bitsNum.bsf) + 1);
             immutable size_t endElemMaskPos = (sign ^ 1) * (startElemMaskPos + sliceLen)
@@ -12636,8 +12750,13 @@ auto ref nullSink()
   Params:
   pipeOnPop = If `Yes.pipeOnPop`, simply iterating the range without ever
   calling `front` is enough to have `tee` mirror elements to `outputRange` (or,
-  respectively, `fun`). If `No.pipeOnPop`, only elements for which `front` does
-  get called will be also sent to `outputRange`/`fun`.
+  respectively, `fun`). Note that each `popFront()` call will mirror the
+  old `front` value, not the new one. This means that the last value will
+  not be forwarded if the range isn't iterated until empty. If
+  `No.pipeOnPop`, only elements for which `front` does get called will be
+  also sent to `outputRange`/`fun`. If `front` is called twice for the same
+  element, it will still be sent only once. If this caching is undesired,
+  consider using $(REF map, std,algorithm,iteration) instead.
   inputRange = The input range being passed through.
   outputRange = This range will receive elements of `inputRange` progressively
   as iteration proceeds.

@@ -56,13 +56,22 @@ import std.range.primitives;
 public import std.system : Endian;
 import std.traits;
 
-private string myToString(ulong n)
+private string myToString(ulong n) pure @safe
 {
     import core.internal.string : UnsignedStringBuf, unsignedToTempString;
     UnsignedStringBuf buf;
     auto s = unsignedToTempString(n, buf);
-    return cast(string) s ~ (n > uint.max ? "UL" : "U");
+    // pure allows implicit cast to string
+    return s ~ (n > uint.max ? "UL" : "U");
 }
+
+@safe pure unittest
+{
+    assert(myToString(5) == "5U");
+    assert(myToString(uint.max) == "4294967295U");
+    assert(myToString(uint.max + 1UL) == "4294967296UL");
+}
+
 
 private template createAccessors(
     string store, T, string name, size_t len, size_t offset)
@@ -277,6 +286,7 @@ of the bitfields storage.
     assert(obj.x == 2);
     assert(obj.y == 0);
     assert(obj.z == 2);
+    assert(obj.flag == false);
 }
 
 /**
@@ -294,6 +304,12 @@ one bitfield with an empty name.
             uint, "",         6));
     }
 
+    A a;
+    assert(a.flag1 == 0);
+    a.flag1 = 1;
+    assert(a.flag1 == 1);
+    a.flag1 = 0;
+    assert(a.flag1 == 0);
 }
 
 /// enums can be used too
@@ -307,51 +323,6 @@ one bitfield with an empty name.
                   bool, "y", 1,
                   ubyte, "z", 5));
     }
-}
-
-/**
-Creates a bitfield pack of eight bits, which fit in
-one `ubyte`. The bitfields are allocated starting from the
-least significant bit, i.e. x occupies the two least significant bits
-of the bitfields storage.
-*/
-@safe unittest
-{
-    struct A
-    {
-        int a;
-        mixin(bitfields!(
-            uint, "x",    2,
-            int,  "y",    3,
-            uint, "z",    2,
-            bool, "flag", 1));
-    }
-    A obj;
-    obj.x = 2;
-    obj.z = obj.x;
-
-    assert(obj.x == 2);
-    assert(obj.y == 0);
-    assert(obj.z == 2);
-    assert(obj.flag == false);
-}
-
-/// Add empty fields for padding to have a total bit length of 8, 16, 32, or 64
-@safe unittest
-{
-    struct A
-    {
-        mixin(bitfields!(
-            bool, "flag1",    1,
-            bool, "flag2",    1,
-            uint, "",         6));
-    }
-    A a;
-    assert(a.flag1 == 0);
-    a.flag1 = 1;
-    assert(a.flag1 == 1);
-    a.flag1 = 0;
-    assert(a.flag1 == 0);
 }
 
 /**
@@ -1018,8 +989,6 @@ public:
 
     This constructor is the inverse of $(LREF opCast).
 
-    $(RED Warning: All unmapped bits in the final word will be set to 0.)
-
     Params:
         v = Source array. `v.length` must be a multple of `size_t.sizeof`.
         numbits = Number of bits to be mapped from the source array, i.e.
@@ -1037,11 +1006,6 @@ public:
     {
         _ptr = cast(size_t*) v.ptr;
         _len = numbits;
-        if (endBits)
-        {
-            // Need to mask away extraneous bits from v.
-            _ptr[dim - 1] &= endMask;
-        }
     }
 
     ///
@@ -1080,7 +1044,8 @@ public:
     @system unittest
     {
         // Example from the doc for this constructor.
-        size_t[] source = [1, 0b101, 3, 3424234, 724398, 230947, 389492];
+        static immutable size_t[] sourceData = [1, 0b101, 3, 3424234, 724398, 230947, 389492];
+        size_t[] source = sourceData.dup;
         enum sbits = size_t.sizeof * 8;
         auto ba = BitArray(source, source.length * sbits);
         foreach (n; 0 .. source.length * sbits)
@@ -1094,8 +1059,8 @@ public:
 
         auto bc = BitArray(source, sbits + 1);
         assert(bc.bitsSet.equal([0, sbits]));
-        // The unmapped bits from the final word have been cleared.
-        assert(source[1] == 1);
+        // Source array has not been modified.
+        assert(source == sourceData);
     }
 
     // Deliberately undocumented: raw initialization of bit array.
@@ -1128,8 +1093,9 @@ public:
     /**********************************************
      * Sets the amount of bits in the `BitArray`.
      * $(RED Warning: increasing length may overwrite bits in
-     * final word up to the next word boundary. i.e. D dynamic
-     * array extension semantics are not followed.)
+     * the final word of the current underlying data regardless
+     * of whether it is shared between BitArray objects. i.e. D
+     * dynamic array extension semantics are not followed.)
      */
     @property size_t length(size_t newlen) pure nothrow @system
     {
@@ -1146,9 +1112,35 @@ public:
                 _ptr = b.ptr;
             }
 
+            auto oldlen = _len;
             _len = newlen;
+            if (oldlen < newlen)
+            {
+                auto end = ((oldlen / bitsPerSizeT) + 1) * bitsPerSizeT;
+                if (end > newlen)
+                    end = newlen;
+                this[oldlen .. end] = 0;
+            }
         }
         return _len;
+    }
+
+    // Issue 20240
+    @system unittest
+    {
+        BitArray ba;
+
+        ba.length = 1;
+        ba[0] = 1;
+        ba.length = 0;
+        ba.length = 1;
+        assert(ba[0] == 0); // OK
+
+        ba.length = 2;
+        ba[1] = 1;
+        ba.length = 1;
+        ba.length = 2;
+        assert(ba[1] == 0); // Fail
     }
 
     /**********************************************
@@ -1232,7 +1224,7 @@ public:
       at index `start` and ends at index ($D end - 1)
       with the values specified by `val`.
      */
-    void opSliceAssign(bool val, size_t start, size_t end)
+    void opSliceAssign(bool val, size_t start, size_t end) pure nothrow
     in
     {
         assert(start <= end, "start must be less or equal to end");
@@ -2523,22 +2515,6 @@ public:
         }
     }
 
-    // @@@DEPRECATED_2.089@@@
-    deprecated("To be removed by 2.089. Please use the writer overload instead.")
-    void toString(scope void delegate(const(char)[]) sink, scope const ref FormatSpec!char fmt) const
-    {
-        const spec = fmt.spec;
-        switch (spec)
-        {
-            case 'b':
-                return formatBitString(sink);
-            case 's':
-                return formatBitArray(sink);
-            default:
-                throw new Exception("Unknown format specifier: %" ~ spec);
-        }
-    }
-
     ///
     @system pure unittest
     {
@@ -2559,12 +2535,16 @@ public:
     @property auto bitsSet() const nothrow
     {
         import std.algorithm.iteration : filter, map, joiner;
-        import std.range : iota;
+        import std.range : iota, chain;
 
-        return iota(dim).
-               filter!(i => _ptr[i])().
-               map!(i => BitsSet!size_t(_ptr[i], i * bitsPerSizeT))().
-               joiner();
+        return chain(
+            iota(fullWords)
+                .filter!(i => _ptr[i])()
+                .map!(i => BitsSet!size_t(_ptr[i], i * bitsPerSizeT))()
+                .joiner(),
+            iota(fullWords * bitsPerSizeT, _len)
+                .filter!(i => this[i])()
+        );
     }
 
     ///
@@ -2602,6 +2582,16 @@ public:
         assert(b.bitsSet.equal(iota(wordBits + 1)));
         b = BitArray([size_t.max, size_t.max], wordBits * 2);
         assert(b.bitsSet.equal(iota(wordBits * 2)));
+    }
+
+    // Issue 20241
+    @system unittest
+    {
+        BitArray ba;
+        ba.length = 2;
+        ba[1] = 1;
+        ba.length = 1;
+        assert(ba.bitsSet.empty);
     }
 
     private void formatBitString(Writer)(auto ref Writer sink) const

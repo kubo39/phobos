@@ -61,7 +61,7 @@ import std.functional : binaryFun;
 
 public import std.container.util;
 
-version (unittest) debug = RBDoChecks;
+version (StdUnittest) debug = RBDoChecks;
 
 //debug = RBDoChecks;
 
@@ -745,11 +745,11 @@ if (is(typeof(binaryFun!less(T.init, T.init))))
 
     alias _less = binaryFun!less;
 
-    version (unittest)
+    version (StdUnittest)
     {
         static if (is(typeof(less) == string))
         {
-            private enum doUnittest = isIntegral!T && (less == "a < b" || less == "a > b");
+            private enum doUnittest = is(byte : T) && isIntegral!T && (less == "a < b" || less == "a > b");
         }
         else
             enum doUnittest = false;
@@ -1945,6 +1945,13 @@ assert(equal(rbt[], [5]));
     test!ushort();
     test!byte();
     test!byte();
+}
+
+// issue 19626
+@safe pure unittest
+{
+    enum T { a, b }
+    alias t = RedBlackTree!T;
 }
 
 import std.range.primitives : isInputRange, ElementType;

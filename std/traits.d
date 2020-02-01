@@ -129,6 +129,7 @@
  *           $(LREF OriginalType)
  *           $(LREF PointerTarget)
  *           $(LREF Signed)
+ *           $(LREF Unconst)
  *           $(LREF Unqual)
  *           $(LREF Unsigned)
  *           $(LREF ValueType)
@@ -469,7 +470,7 @@ template QualifierOf(T)
     alias Qual7 = QualifierOf!(   immutable int);   static assert(is(Qual7!long ==    immutable long));
 }
 
-version (unittest)
+version (StdUnittest)
 {
     alias TypeQualifierList = AliasSeq!(MutableOf, ConstOf, SharedOf, SharedConstOf, ImmutableOf);
 
@@ -652,7 +653,7 @@ if (T.length == 1)
     static assert(fullyQualifiedName!fullyQualifiedName == "std.traits.fullyQualifiedName");
 }
 
-version (unittest)
+version (StdUnittest)
 {
     // Used for both fqnType and fqnSym unittests
     private struct QualifiedNameTests
@@ -2462,7 +2463,7 @@ if (is(T == function))
     assert(g() > 0);
 }
 
-version (unittest)
+version (StdUnittest)
 {
 private:
     // Some function types to test.
@@ -4584,8 +4585,11 @@ if (is(C == class) || is(C == interface))
                 alias CollectOverloads = AliasSeq!(); // no overloads in this hierarchy
         }
 
-        // duplicates in this tuple will be removed by shrink()
-        alias overloads = CollectOverloads!C;
+        static if (name == "__ctor" || name == "__dtor")
+            alias overloads = AliasSeq!(__traits(getOverloads, C, name));
+        else
+            // duplicates in this tuple will be removed by shrink()
+            alias overloads = CollectOverloads!C;
 
         // shrinkOne!args[0]    = the most derived one in the covariant siblings of target
         // shrinkOne!args[1..$] = non-covariant others
@@ -4681,6 +4685,40 @@ if (is(C == class) || is(C == interface))
     alias bfs = __traits(getOverloads, B, "f");
     assert(__traits(isSame, fs[0], bfs[0]) || __traits(isSame, fs[0], bfs[1]));
     assert(__traits(isSame, fs[1], bfs[0]) || __traits(isSame, fs[1], bfs[1]));
+}
+
+@safe unittest // Issue 8388
+{
+    class C
+    {
+        this() {}
+        this(int i) {}
+        this(int i, float j) {}
+        this(string s) {}
+
+        /*
+         Commented out, because this causes a cyclic dependency
+         between module constructors/destructors error. Might
+         be caused by issue 20529. */
+        // static this() {}
+
+        ~this() {}
+    }
+
+    class D : C
+    {
+        this() {}
+        ~this() {}
+    }
+
+    alias test_ctor = MemberFunctionsTuple!(C, "__ctor");
+    assert(test_ctor.length == 4);
+    alias test_dtor = MemberFunctionsTuple!(C, "__dtor");
+    assert(test_dtor.length == 1);
+    alias test2_ctor = MemberFunctionsTuple!(D, "__ctor");
+    assert(test2_ctor.length == 1);
+    alias test2_dtor = MemberFunctionsTuple!(D, "__dtor");
+    assert(test2_dtor.length == 1);
 }
 
 @safe unittest
@@ -4998,7 +5036,7 @@ template ImplicitConversionTargets(T)
             AliasSeq!(int, uint, long, ulong, CentTypeList, float, double, real);
     else static if (is(T : typeof(null)))
         alias ImplicitConversionTargets = AliasSeq!(typeof(null));
-    else static if (is(T : Object))
+    else static if (is(T == class))
         alias ImplicitConversionTargets = TransitiveBaseTypeTuple!(T);
     else static if (isDynamicArray!T && !is(typeof(T.init[0]) == const))
     {
@@ -6648,9 +6686,19 @@ package template convertToString(T)
 /**
  * Detect whether type `T` is a string that will be autodecoded.
  *
- * All arrays that use char, wchar, and their qualified versions are narrow
- * strings. (Those include string and wstring).
- * Aggregates that implicitly cast to narrow strings are included.
+ * Given a type `S` that is one of:
+ * $(OL
+ *  $(LI `const(char)[]`)
+ *  $(LI `const(wchar)[]`)
+ * )
+ * Type `T` can be one of:
+ * $(OL
+ *    $(LI `S`)
+ *    $(LI implicitly convertible to `T`)
+ *    $(LI an enum with a base type `T`)
+ *    $(LI an aggregate with a base type `T`)
+ * )
+ * with the proviso that `T` cannot be a static array.
  *
  * Params:
  *      T = type to be tested
@@ -6677,9 +6725,30 @@ template isAutodecodableString(T)
         string s;
         alias s this;
     }
-    assert(isAutodecodableString!wstring);
-    assert(isAutodecodableString!Stringish);
-    assert(!isAutodecodableString!dstring);
+    static assert(isAutodecodableString!wstring);
+    static assert(isAutodecodableString!Stringish);
+    static assert(!isAutodecodableString!dstring);
+
+    enum E : const(char)[3] { X = "abc" }
+    enum F : const(char)[] { X = "abc" }
+    enum G : F { X = F.init }
+
+    static assert(isAutodecodableString!(char[]));
+    static assert(!isAutodecodableString!(E));
+    static assert(isAutodecodableString!(F));
+    static assert(isAutodecodableString!(G));
+
+    struct Stringish2
+    {
+        Stringish s;
+        alias s this;
+    }
+
+    enum H : Stringish { X = Stringish() }
+    enum I : Stringish2 { X = Stringish2() }
+
+    static assert(isAutodecodableString!(H));
+    static assert(isAutodecodableString!(I));
 }
 
 /**
@@ -7461,6 +7530,41 @@ if (T.length == 1)
 //::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::://
 
 /**
+Removes `const`, `inout` and `immutable` qualifiers, if any, from type `T`.
+ */
+template Unconst(T)
+{
+    import core.internal.traits : CoreUnconst = Unconst;
+    alias Unconst = CoreUnconst!(T);
+}
+
+///
+@safe unittest
+{
+    static assert(is(Unconst!int == int));
+    static assert(is(Unconst!(const int) == int));
+    static assert(is(Unconst!(immutable int) == int));
+    static assert(is(Unconst!(shared int) == shared int));
+    static assert(is(Unconst!(shared(const int)) == shared int));
+}
+
+@safe unittest
+{
+    static assert(is(Unconst!(                   int) == int));
+    static assert(is(Unconst!(             const int) == int));
+    static assert(is(Unconst!(       inout       int) == int));
+    static assert(is(Unconst!(       inout const int) == int));
+    static assert(is(Unconst!(shared             int) == shared int));
+    static assert(is(Unconst!(shared       const int) == shared int));
+    static assert(is(Unconst!(shared inout       int) == shared int));
+    static assert(is(Unconst!(shared inout const int) == shared int));
+    static assert(is(Unconst!(         immutable int) == int));
+
+    alias ImmIntArr = immutable(int[]);
+    static assert(is(Unconst!ImmIntArr == immutable(int)[]));
+}
+
+/**
 Removes all qualifiers, if any, from type `T`.
  */
 template Unqual(T)
@@ -7997,7 +8101,7 @@ if (sth.length == 1)
     static assert(TL == AliasSeq!("i", "xi", "yi"));
 }
 
-version (unittest) private void freeFunc(string);
+version (StdUnittest) private void freeFunc(string);
 
 @safe unittest
 {
@@ -8342,7 +8446,7 @@ private template isDesiredUDA(alias attribute)
 
 /**
 Params:
-    symbol = The aggregate type to search
+    symbol = The aggregate type or module to search
     attribute = The user-defined attribute to search for
 
 Returns:
@@ -8353,7 +8457,6 @@ Note:
     nested structs or unions.
  */
 template getSymbolsByUDA(alias symbol, alias attribute)
-if (isAggregateType!symbol)
 {
     alias membersWithUDA = getSymbolsByUDAImpl!(symbol, attribute, __traits(allMembers, symbol));
 
@@ -8480,15 +8583,6 @@ if (isAggregateType!symbol)
     static assert(getSymbolsByUDA!(A, attr2).length == 1);
 }
 
-// Issue 19105
-@safe unittest
-{
-    struct A(Args...) {}
-    struct B {}
-    // modules cannot be passed as the first argument of getSymbolsByUDA
-    static assert(!__traits(compiles, A!( getSymbolsByUDA!(traits, B))));
-}
-
 // #15335: getSymbolsByUDA fails if type has private members
 @safe unittest
 {
@@ -8541,6 +8635,14 @@ if (isAggregateType!symbol)
     }
 
     static assert(getSymbolsByUDA!(A, Attr).stringof == "tuple(a, a, c)");
+}
+
+// Issue 20054: getSymbolsByUDA no longer works on modules
+version (StdUnittest)
+{
+    @("Issue20054")
+    void issue20054() {}
+    static assert(__traits(compiles, getSymbolsByUDA!(mixin(__MODULE__), "Issue20054")));
 }
 
 private template getSymbolsByUDAImpl(alias symbol, alias attribute, names...)

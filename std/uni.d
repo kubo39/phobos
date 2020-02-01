@@ -708,40 +708,13 @@ import std.range.primitives : back, ElementEncodingType, ElementType, empty,
     front, hasLength, hasSlicing, isForwardRange, isInputRange,
     isRandomAccessRange, popFront, put, save;
 import std.traits : isConvertibleToString, isIntegral, isSomeChar,
-    isSomeString, Unqual;
+    isSomeString, Unqual, isDynamicArray;
 // debug = std_uni;
 
 debug(std_uni) import std.stdio; // writefln, writeln
 
 private:
 
-version (unittest)
-{
-private:
-    struct TestAliasedString
-    {
-        string get() @safe @nogc pure nothrow { return _s; }
-        alias get this;
-        @disable this(this);
-        string _s;
-    }
-
-    bool testAliasedString(alias func, Args...)(string s, Args args)
-    {
-        import std.algorithm.comparison : equal;
-        auto a = func(TestAliasedString(s), args);
-        auto b = func(s, args);
-        static if (is(typeof(equal(a, b))))
-        {
-            // For ranges, compare contents instead of object identity.
-            return equal(a, b);
-        }
-        else
-        {
-            return a == b;
-        }
-    }
-}
 
 void copyBackwards(T,U)(T[] src, U[] dest)
 {
@@ -3509,14 +3482,10 @@ pure @safe unittest// Uint24 tests
     }}
 }
 
-version (unittest)
-{
-    private alias AllSets = AliasSeq!(InversionList!GcPolicy, InversionList!ReallocPolicy);
-}
-
 pure @safe unittest// core set primitives test
 {
     import std.conv : text;
+    alias AllSets = AliasSeq!(InversionList!GcPolicy, InversionList!ReallocPolicy);
     foreach (CodeList; AllSets)
     {
         CodeList a;
@@ -3638,6 +3607,7 @@ pure @safe unittest
 pure @safe unittest
 {   // full set operations
     import std.conv : text;
+    alias AllSets = AliasSeq!(InversionList!GcPolicy, InversionList!ReallocPolicy);
     foreach (CodeList; AllSets)
     {
         CodeList a, b, c, d;
@@ -4843,7 +4813,8 @@ template Utf8Matcher()
         enum dispatch = genDispatch();
 
         public bool match(Range)(ref Range inp) const
-            if (isRandomAccessRange!Range && is(ElementType!Range : char))
+            if (isRandomAccessRange!Range && is(ElementType!Range : char) &&
+                !isDynamicArray!Range)
         {
             enum mode = Mode.skipOnMatch;
             assert(!inp.empty);
@@ -4867,7 +4838,8 @@ template Utf8Matcher()
         static if (Sizes.length == 4) // can skip iff can detect all encodings
         {
             public bool skip(Range)(ref Range inp) const
-                if (isRandomAccessRange!Range && is(ElementType!Range : char))
+                if (isRandomAccessRange!Range && is(ElementType!Range : char) &&
+                    !isDynamicArray!Range)
             {
                 enum mode = Mode.alwaysSkip;
                 assert(!inp.empty);
@@ -4888,7 +4860,8 @@ template Utf8Matcher()
         }
 
         public bool test(Range)(ref Range inp) const
-            if (isRandomAccessRange!Range && is(ElementType!Range : char))
+            if (isRandomAccessRange!Range && is(ElementType!Range : char) &&
+                !isDynamicArray!Range)
         {
             enum mode = Mode.neverSkip;
             assert(!inp.empty);
@@ -5073,7 +5046,8 @@ template Utf16Matcher()
     mixin template DefMatcher()
     {
         public bool match(Range)(ref Range inp) const
-            if (isRandomAccessRange!Range && is(ElementType!Range : wchar))
+            if (isRandomAccessRange!Range && is(ElementType!Range : wchar) &&
+                !isDynamicArray!Range)
         {
             enum mode = Mode.skipOnMatch;
             assert(!inp.empty);
@@ -5099,7 +5073,8 @@ template Utf16Matcher()
         static if (Sizes.length == 2)
         {
             public bool skip(Range)(ref Range inp) const
-                if (isRandomAccessRange!Range && is(ElementType!Range : wchar))
+                if (isRandomAccessRange!Range && is(ElementType!Range : wchar) &&
+                    !isDynamicArray!Range)
             {
                 enum mode = Mode.alwaysSkip;
                 assert(!inp.empty);
@@ -5120,7 +5095,8 @@ template Utf16Matcher()
         }
 
         public bool test(Range)(ref Range inp) const
-            if (isRandomAccessRange!Range && is(ElementType!Range : wchar))
+            if (isRandomAccessRange!Range && is(ElementType!Range : wchar) &&
+                !isDynamicArray!Range)
         {
             enum mode = Mode.neverSkip;
             assert(!inp.empty);
@@ -7243,7 +7219,7 @@ if (isInputRange!Range && is(Unqual!(ElementType!Range) == dchar))
 }
 
 // For testing non-forward-range input ranges
-version (unittest)
+version (StdUnittest)
 private static struct InputRangeString
 {
     private string s;
@@ -9249,8 +9225,32 @@ if (isConvertibleToString!Range)
 
 @safe unittest
 {
+    static struct TestAliasedString
+    {
+        string get() @safe @nogc pure nothrow { return _s; }
+        alias get this;
+        @disable this(this);
+        string _s;
+    }
+
+    static bool testAliasedString(alias func, Args...)(string s, Args args)
+    {
+        import std.algorithm.comparison : equal;
+        auto a = func(TestAliasedString(s), args);
+        auto b = func(s, args);
+        static if (is(typeof(equal(a, b))))
+        {
+            // For ranges, compare contents instead of object identity.
+            return equal(a, b);
+        }
+        else
+        {
+            return a == b;
+        }
+    }
     assert(testAliasedString!asLowerCase("hEllo"));
     assert(testAliasedString!asUpperCase("hEllo"));
+    assert(testAliasedString!asCapitalized("hEllo"));
 }
 
 @safe unittest
@@ -9434,11 +9434,6 @@ if (isConvertibleToString!Range)
 {
     import std.traits : StringTypeOf;
     return asCapitalized!(StringTypeOf!Range)(str);
-}
-
-@safe unittest
-{
-    assert(testAliasedString!asCapitalized("hEllo"));
 }
 
 @safe pure nothrow @nogc unittest

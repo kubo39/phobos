@@ -207,6 +207,12 @@ if (isBidirectionalRange!Range)
     assert(counter == iota(-4, 5).length);
 }
 
+// issue 15891
+@safe pure unittest
+{
+    assert([1].map!(x=>[x].map!(y=>y)).cache.front.front == 1);
+}
+
 /++
 Tip: `cache` is eager when evaluating elements. If calling front on the
 underlying range has a side effect, it will be observable before calling
@@ -343,9 +349,17 @@ private struct _Cache(R, bool bidir)
         source = range;
         if (!range.empty)
         {
-             caches[0] = source.front;
-             static if (bidir)
-                 caches[1] = source.back;
+            caches[0] = source.front;
+            static if (bidir)
+                caches[1] = source.back;
+        }
+        else
+        {
+            // needed, because the compiler cannot deduce, that 'caches' is initialized
+            // see issue 15891
+            caches[0] = UE.init;
+            static if (bidir)
+                caches[1] = UE.init;
         }
     }
 
@@ -380,7 +394,12 @@ private struct _Cache(R, bool bidir)
         if (!source.empty)
             caches[0] = source.front;
         else
-            caches = CacheTypes.init;
+        {
+            // see issue 15891
+            caches[0] = UE.init;
+            static if (bidir)
+                caches[1] = UE.init;
+        }
     }
     static if (bidir) void popBack()
     {
@@ -389,7 +408,11 @@ private struct _Cache(R, bool bidir)
         if (!source.empty)
             caches[1] = source.back;
         else
-            caches = CacheTypes.init;
+        {
+            // see issue 15891
+            caches[0] = UE.init;
+            caches[1] = UE.init;
+        }
     }
 
     static if (isForwardRange!R)
@@ -501,14 +524,13 @@ if (fun.length >= 1)
 }
 
 ///
-@safe unittest
+@safe @nogc unittest
 {
     import std.algorithm.comparison : equal;
-    import std.range : chain;
-    int[] arr1 = [ 1, 2, 3, 4 ];
-    int[] arr2 = [ 5, 6 ];
-    auto squares = map!(a => a * a)(chain(arr1, arr2));
-    assert(equal(squares, [ 1, 4, 9, 16, 25, 36 ]));
+    import std.range : chain, only;
+    auto squares =
+        chain(only(1, 2, 3, 4), only(5, 6)).map!(a => a * a);
+    assert(equal(squares, only(1, 4, 9, 16, 25, 36)));
 }
 
 /**
@@ -1790,7 +1812,7 @@ if (isInputRange!R)
     assert(equal(g3, [ tuple(1, 2u), tuple(2, 2u) ]));
 
     interface I {}
-    class C : I {}
+    class C : I { override size_t toHash() const nothrow @safe { return 0; } }
     const C[] a4 = [new const C()];
     auto g4 = a4.group!"a is b";
     assert(g4.front[1] == 1);
@@ -1831,7 +1853,8 @@ pure @safe unittest // issue 18657
 {
     import std.algorithm.comparison : equal;
     import std.range : refRange;
-    auto r = refRange(&["foo"][0]).group;
+    string s = "foo";
+    auto r = refRange(&s).group;
     assert(equal(r.save, "foo".group));
     assert(equal(r, "foo".group));
 }
@@ -5376,7 +5399,8 @@ pure @safe unittest // issue 18657
 {
     import std.algorithm.comparison : equal;
     import std.range : refRange;
-    auto r = refRange(&["foobar"][0]).splitter!(c => c == 'b');
+    string s = "foobar";
+    auto r = refRange(&s).splitter!(c => c == 'b');
     assert(equal!equal(r.save, ["foo", "ar"]));
     assert(equal!equal(r.save, ["foo", "ar"]));
 }
@@ -6396,6 +6420,9 @@ if (isInputRange!R && !isInfinite!R && is(typeof(r.front + r.front)))
         alias Seed = typeof(E.init  + 0.0); //biggest of double/real
     else
         alias Seed = typeof(r.front + r.front);
+    static assert(is(typeof(Unqual!Seed(0))),
+        "Could not initiate an initial value for " ~ (Unqual!Seed).stringof
+        ~ ". Please supply an initial value manually.");
     return sum(r, Unqual!Seed(0));
 }
 /// ditto

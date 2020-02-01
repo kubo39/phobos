@@ -1240,7 +1240,9 @@ public:
 
 @safe unittest
 {
-    assert(VariantN!(24).sizeof == 24 + (void*).sizeof);
+    alias V = VariantN!24;
+    const alignMask = V.alignof - 1;
+    assert(V.sizeof == ((24 + (void*).sizeof + alignMask) & ~alignMask));
 }
 
 /// Can also assign class values
@@ -3058,6 +3060,19 @@ if (isAlgebraic!VariantType && Handler.length > 0)
     v1 = dyn;
     assert(v1 == el); // Compare Var(dynamic) to static.
     assert(v1 == [0, 1] ~ [2, 3]); // Compare Var(dynamic) to dynamic
+}
+
+@system unittest
+{
+    // Bugzilla 15940
+    class C { }
+    struct S
+    {
+        C a;
+        alias a this;
+    }
+    S s = S(new C());
+    auto v = Variant(s); // compile error
 }
 
 @system unittest

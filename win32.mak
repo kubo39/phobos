@@ -41,13 +41,13 @@ DRUNTIMELIB=$(DRUNTIME)/lib/druntime.lib
 
 ## Flags for dmd D compiler
 
-DFLAGS=-conf= -O -release -w -de -dip25 -I$(DRUNTIME)\import
+DFLAGS=-conf= -O -release -w -de -preview=dip1000 -transition=complex -I$(DRUNTIME)\import
 #DFLAGS=-unittest -g
 #DFLAGS=-unittest -cov -g
 
 ## Flags for compiling unittests
 
-UDFLAGS=-unittest -conf= -O -w -dip25 -I$(DRUNTIME)\import
+UDFLAGS=-unittest -version=StdUnittest -version=CoreUnittest -conf= -O -w -preview=dip1000 -transition=complex -I$(DRUNTIME)\import
 
 ## C compiler
 
@@ -253,7 +253,7 @@ SRC_STD_INTERNAL_WINDOWS= \
 	std\internal\windows\advapi32.d
 
 SRC_STD_EXP= \
-	std\experimental\all.d std\experimental\checkedint.d std\experimental\typecons.d
+	std\experimental\checkedint.d std\experimental\typecons.d
 
 SRC_STD_EXP_ALLOC_BB= \
 	std\experimental\allocator\building_blocks\affix_allocator.d \

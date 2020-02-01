@@ -161,7 +161,7 @@ import std.traits;
     assert([0, 1, 2, 4, 5].randomShuffle(rnd2).equal([2, 0, 4, 5, 1]));
 }
 
-version (unittest)
+version (StdUnittest)
 {
     static import std.meta;
     package alias Xorshift64_64 = XorshiftEngine!(ulong, 64, -12, 25, -27);
@@ -730,7 +730,7 @@ if (isUnsigned!UIntType)
     static assert(0 <= r && 0 <= u && 0 <= s && 0 <= t && 0 <= l);
     static assert(r <= w && u <= w && s <= w && t <= w && l <= w);
     static assert(0 <= a && 0 <= b && 0 <= c);
-    static assert(n <= sizediff_t.max);
+    static assert(n <= ptrdiff_t.max);
 
     ///Mark this as a Rng
     enum bool isUniformRandom = true;
@@ -902,7 +902,7 @@ Parameters for the generator.
         size_t j;
         for (j = 0; j < n && !range.empty; ++j, range.popFront())
         {
-            sizediff_t idx = n - j - 1;
+            ptrdiff_t idx = n - j - 1;
             mtState.data[idx] = range.front;
         }
 
@@ -951,12 +951,12 @@ Parameters for the generator.
            them separately in sequence, the variables
            are kept 'hot' in CPU registers, allowing
            for significantly faster performance. */
-        sizediff_t index = mtState.index;
-        sizediff_t next = index - 1;
+        ptrdiff_t index = mtState.index;
+        ptrdiff_t next = index - 1;
         if (next < 0)
             next = n - 1;
         auto z = mtState.z;
-        sizediff_t conj = index - m;
+        ptrdiff_t conj = index - m;
         if (conj < 0)
             conj = index - m + n;
 
@@ -2950,9 +2950,10 @@ do
 - bigger length means non-GC heap allocation(s) and dealloc. +/
 private struct RandomCoverChoices
 {
-    private void* buffer;
+    private size_t* buffer;
     private immutable size_t _length;
     private immutable bool hasPackedBits;
+    private enum BITS_PER_WORD = typeof(buffer[0]).sizeof * 8;
 
     void opAssign(T)(T) @disable;
 
@@ -2963,8 +2964,9 @@ private struct RandomCoverChoices
 
         if (!hasPackedBits && buffer !is null)
         {
-            void* nbuffer = enforceMalloc(_length);
-            buffer = memcpy(nbuffer, buffer, _length);
+            const nBytesToAlloc = 8 * (_length / BITS_PER_WORD + int(_length % BITS_PER_WORD != 0));
+            void* nbuffer = enforceMalloc(nBytesToAlloc);
+            buffer = cast(size_t*) memcpy(nbuffer, buffer, nBytesToAlloc);
         }
     }
 
@@ -2976,7 +2978,8 @@ private struct RandomCoverChoices
         hasPackedBits = _length <= size_t.sizeof * 8;
         if (!hasPackedBits)
         {
-            buffer = enforceCalloc(numChoices, 1);
+            const nWordsToAlloc = _length / BITS_PER_WORD + int(_length % BITS_PER_WORD != 0);
+            buffer = cast(size_t*) enforceCalloc(nWordsToAlloc, BITS_PER_WORD / 8);
         }
     }
 
@@ -2993,8 +2996,9 @@ private struct RandomCoverChoices
     bool opIndex(size_t index) const pure nothrow @nogc @trusted
     {
         assert(index < _length);
+        import core.bitop : bt;
         if (!hasPackedBits)
-            return *((cast(bool*) buffer) + index);
+            return cast(bool) bt(buffer, index);
         else
             return ((cast(size_t) buffer) >> index) & size_t(1);
     }
@@ -3004,7 +3008,11 @@ private struct RandomCoverChoices
         assert(index < _length);
         if (!hasPackedBits)
         {
-            *((cast(bool*) buffer) + index) = value;
+            import core.bitop : btr, bts;
+            if (value)
+                bts(buffer, index);
+            else
+                btr(buffer, index);
         }
         else
         {
@@ -3995,7 +4003,7 @@ if (isInputRange!Range && hasLength!Range && isUniformRNG!UniformRNG)
          */
         {
             size_t count0, count1, count99;
-            foreach (_; 0 .. 100_000)
+            foreach (_; 0 .. 50_000)
             {
                 auto sample = randomSample(iota(100), 5, &rng);
                 sample.popFront();
@@ -4030,9 +4038,9 @@ if (isInputRange!Range && hasLength!Range && isUniformRNG!UniformRNG)
              * the variance can be quite high.
              */
             assert(count0 == 0);
-            assert(count1 < 300, text("1: ", count1, " > 300."));
-            assert(4_700 < count99, text("99: ", count99, " < 4700."));
-            assert(count99 < 5_300, text("99: ", count99, " > 5300."));
+            assert(count1 < 150, text("1: ", count1, " > 150."));
+            assert(2_200 < count99, text("99: ", count99, " < 2200."));
+            assert(count99 < 2_800, text("99: ", count99, " > 2800."));
         }
 
         /* Odd corner-cases: RandomSample has 2 constructors that are not called

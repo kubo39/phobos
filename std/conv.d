@@ -389,7 +389,7 @@ template to(T)
  *   $(LI Converts array (other than strings) _to string.
  *        Each element is converted by calling `to!T`.)
  *   $(LI Associative array _to string conversion.
- *        Each element is printed by calling `to!T`.)
+ *        Each element is converted by calling `to!T`.)
  *   $(LI Object _to string conversion calls `toString` against the object or
  *        returns `"null"` if the object is null.)
  *   $(LI Struct _to string conversion calls `toString` against the struct if
@@ -397,7 +397,7 @@ template to(T)
  *   $(LI For structs that do not define `toString`, the conversion _to string
  *        produces the list of fields.)
  *   $(LI Enumerated types are converted _to strings as their symbolic names.)
- *   $(LI Boolean values are printed as `"true"` or `"false"`.)
+ *   $(LI Boolean values are converted to `"true"` or `"false"`.)
  *   $(LI `char`, `wchar`, `dchar` _to a string type.)
  *   $(LI Unsigned or signed integers _to strings.
  *        $(DL $(DT [special case])
@@ -407,9 +407,10 @@ template to(T)
  *             The characters A through Z are used to represent values 10 through 36
  *             and their case is determined by the $(D_PARAM letterCase) parameter.)))
  *   $(LI All floating point types _to all string types.)
- *   $(LI Pointer to string conversions prints the pointer as a `size_t` value.
+ *   $(LI Pointer to string conversions convert the pointer to a `size_t` value.
  *        If pointer is `char*`, treat it as C-style strings.
  *        In that case, this function is `@system`.))
+ * See $(REF formatValue, std,format) on how toString should be defined.
  */
 @system pure unittest // @system due to cast and ptr
 {
@@ -1061,7 +1062,7 @@ if (!(isImplicitlyConvertible!(S, T) &&
 private T toImpl(T, S)(ref S value)
 if (!(isImplicitlyConvertible!(S, T) &&
     !isEnumStrToStr!(S, T) && !isNullToStr!(S, T)) &&
-    !isInfinite!S && isExactSomeString!T && !isCopyable!S)
+    !isInfinite!S && isExactSomeString!T && !isCopyable!S && !isStaticArray!S)
 {
     import std.array : appender;
     import std.format : FormatSpec, formatValue;
@@ -1098,6 +1099,18 @@ if (!(isImplicitlyConvertible!(S, T) &&
 
     auto b = B();
     assert(to!string(b) == "B(0, false)");
+}
+
+// Bugzilla 20070
+@safe unittest
+{
+    void writeThem(T)(ref inout(T) them)
+    {
+        assert(them.to!string == "[1, 2, 3, 4]");
+    }
+
+    const(uint)[4] vals = [ 1, 2, 3, 4 ];
+    writeThem(vals);
 }
 
 /*
@@ -1687,77 +1700,74 @@ if (!isImplicitlyConvertible!(S, T) && isAssociativeArray!S &&
     assert(a.to!(const(int)[int]).byPair.equal(a.byPair));
 }
 
-version (unittest)
-private void testIntegralToFloating(Integral, Floating)()
-{
-    Integral a = 42;
-    auto b = to!Floating(a);
-    assert(a == b);
-    assert(a == to!Integral(b));
-}
-
-version (unittest)
-private void testFloatingToIntegral(Floating, Integral)()
-{
-    bool convFails(Source, Target, E)(Source src)
-    {
-        try
-            cast(void) to!Target(src);
-        catch (E)
-            return true;
-        return false;
-    }
-
-    // convert some value
-    Floating a = 4.2e1;
-    auto b = to!Integral(a);
-    assert(is(typeof(b) == Integral) && b == 42);
-    // convert some negative value (if applicable)
-    a = -4.2e1;
-    static if (Integral.min < 0)
-    {
-        b = to!Integral(a);
-        assert(is(typeof(b) == Integral) && b == -42);
-    }
-    else
-    {
-        // no go for unsigned types
-        assert(convFails!(Floating, Integral, ConvOverflowException)(a));
-    }
-    // convert to the smallest integral value
-    a = 0.0 + Integral.min;
-    static if (Integral.min < 0)
-    {
-        a = -a; // -Integral.min not representable as an Integral
-        assert(convFails!(Floating, Integral, ConvOverflowException)(a)
-                || Floating.sizeof <= Integral.sizeof);
-    }
-    a = 0.0 + Integral.min;
-    assert(to!Integral(a) == Integral.min);
-    --a; // no more representable as an Integral
-    assert(convFails!(Floating, Integral, ConvOverflowException)(a)
-            || Floating.sizeof <= Integral.sizeof);
-    a = 0.0 + Integral.max;
-    assert(to!Integral(a) == Integral.max || Floating.sizeof <= Integral.sizeof);
-    ++a; // no more representable as an Integral
-    assert(convFails!(Floating, Integral, ConvOverflowException)(a)
-            || Floating.sizeof <= Integral.sizeof);
-    // convert a value with a fractional part
-    a = 3.14;
-    assert(to!Integral(a) == 3);
-    a = 3.99;
-    assert(to!Integral(a) == 3);
-    static if (Integral.min < 0)
-    {
-        a = -3.14;
-        assert(to!Integral(a) == -3);
-        a = -3.99;
-        assert(to!Integral(a) == -3);
-    }
-}
-
 @safe pure unittest
 {
+    static void testIntegralToFloating(Integral, Floating)()
+    {
+        Integral a = 42;
+        auto b = to!Floating(a);
+        assert(a == b);
+        assert(a == to!Integral(b));
+    }
+    static void testFloatingToIntegral(Floating, Integral)()
+    {
+        bool convFails(Source, Target, E)(Source src)
+        {
+            try
+                cast(void) to!Target(src);
+            catch (E)
+                return true;
+            return false;
+        }
+
+        // convert some value
+        Floating a = 4.2e1;
+        auto b = to!Integral(a);
+        assert(is(typeof(b) == Integral) && b == 42);
+        // convert some negative value (if applicable)
+        a = -4.2e1;
+        static if (Integral.min < 0)
+        {
+            b = to!Integral(a);
+            assert(is(typeof(b) == Integral) && b == -42);
+        }
+        else
+        {
+            // no go for unsigned types
+            assert(convFails!(Floating, Integral, ConvOverflowException)(a));
+        }
+        // convert to the smallest integral value
+        a = 0.0 + Integral.min;
+        static if (Integral.min < 0)
+        {
+            a = -a; // -Integral.min not representable as an Integral
+            assert(convFails!(Floating, Integral, ConvOverflowException)(a)
+                    || Floating.sizeof <= Integral.sizeof);
+        }
+        a = 0.0 + Integral.min;
+        assert(to!Integral(a) == Integral.min);
+        --a; // no more representable as an Integral
+        assert(convFails!(Floating, Integral, ConvOverflowException)(a)
+                || Floating.sizeof <= Integral.sizeof);
+        a = 0.0 + Integral.max;
+        assert(to!Integral(a) == Integral.max || Floating.sizeof <= Integral.sizeof);
+        ++a; // no more representable as an Integral
+        assert(convFails!(Floating, Integral, ConvOverflowException)(a)
+                || Floating.sizeof <= Integral.sizeof);
+        // convert a value with a fractional part
+        a = 3.14;
+        assert(to!Integral(a) == 3);
+        a = 3.99;
+        assert(to!Integral(a) == 3);
+        static if (Integral.min < 0)
+        {
+            a = -3.14;
+            assert(to!Integral(a) == -3);
+            a = -3.99;
+            assert(to!Integral(a) == -3);
+        }
+    }
+
     alias AllInts = AliasSeq!(byte, ubyte, short, ushort, int, uint, long, ulong);
     alias AllFloats = AliasSeq!(float, double, real);
     alias AllNumerics = AliasSeq!(AllInts, AllFloats);
@@ -1844,9 +1854,12 @@ private void testFloatingToIntegral(Floating, Integral)()
         foreach (T; AllNumerics)
         {
             T a = 42;
-            assert(to!string(a) == "42");
-            assert(to!wstring(a) == "42"w);
-            assert(to!dstring(a) == "42"d);
+            string s = to!string(a);
+            assert(s == "42", s);
+            wstring ws = to!wstring(a);
+            assert(ws == "42"w, to!string(ws));
+            dstring ds = to!dstring(a);
+            assert(ds == "42"d, to!string(ds));
             // array test
             T[] b = new T[2];
             b[0] = 42;
@@ -2029,10 +2042,17 @@ template roundTo(Target)
 {
     Target roundTo(Source)(Source value)
     {
-        import std.math : trunc;
+        import std.math : abs, log2, trunc;
 
         static assert(isFloatingPoint!Source);
         static assert(isIntegral!Target);
+
+        // If value >= 2 ^^ (real.mant_dig - 1), the number is an integer
+        // and adding 0.5 won't work, but we allready know, that we do
+        // not have to round anything.
+        if (log2(abs(value)) >= real.mant_dig - 1)
+            return to!Target(value);
+
         return to!Target(trunc(value + (value < 0 ? -0.5L : 0.5L)));
     }
 }
@@ -2070,6 +2090,27 @@ template roundTo(Target)
     assertThrown!ConvException(roundTo!int(float.init));
     auto ex = collectException(roundTo!int(float.init));
     assert(ex.msg == "Input was NaN");
+}
+
+// issue 5232
+@safe pure unittest
+{
+    real r1 = ulong.max;
+    assert(roundTo!ulong(r1) == ulong.max);
+
+    real r2 = ulong.max - 1;
+    assert(roundTo!ulong(r2) == ulong.max - 1);
+
+    real r3 = ulong.max / 2;
+    assert(roundTo!ulong(r3) == ulong.max / 2);
+
+    real r4 = ulong.max / 2 + 1;
+    assert(roundTo!ulong(r4) == ulong.max / 2 + 1);
+
+    // this is only an issue on computers where real == double
+    long l = -(2L ^^ double.mant_dig) + 1;
+    double r5 = l;
+    assert(roundTo!long(r5) == l);
 }
 
 /**
@@ -2558,6 +2599,13 @@ Lerr:
     assert(parse!int(input) == 777);
 }
 
+// issue 9621
+@safe pure unittest
+{
+    string s1 = "[ \"\\141\", \"\\0\", \"\\41\", \"\\418\" ]";
+    assert(parse!(string[])(s1) == ["a", "\0", "!", "!8"]);
+}
+
 /// ditto
 Target parse(Target, Source)(ref Source source, uint radix)
 if (isSomeChar!(ElementType!Source) &&
@@ -2589,6 +2637,7 @@ do
         alias s = source;
     }
 
+    auto found = false;
     do
     {
         uint c = s.front;
@@ -2615,7 +2664,16 @@ do
         enforce!ConvOverflowException(!overflow && nextv <= Target.max, "Overflow in integral conversion");
         v = cast(Target) nextv;
         s.popFront();
+        found = true;
     } while (!s.empty);
+
+    if (!found)
+    {
+        static if (isNarrowString!Source)
+            throw convError!(Source, Target)(cast(Source) source);
+        else
+            throw convError!(Source, Target)(source);
+    }
 
     static if (isNarrowString!Source)
         source = cast(Source) s;
@@ -2663,6 +2721,14 @@ do
 {
     auto str = "0=\x00\x02\x55\x40&\xff\xf0\n\x00\x04\x55\x40\xff\xf0~4+10\n";
     assert(parse!uint(str) == 0);
+}
+
+@safe pure unittest // bugzilla 18248
+{
+    import std.exception : assertThrown;
+
+    auto str = ";";
+    assertThrown(str.parse!uint(16));
 }
 
 /**
@@ -3052,7 +3118,7 @@ if (isInputRange!Source && isSomeChar!(ElementType!Source) && !is(Source == enum
 @safe unittest
 {
     import std.exception;
-    import std.math : isNaN, fabs;
+    import std.math : isNaN, fabs, isInfinity;
 
     // Compare reals with given precision
     bool feq(in real rx, in real ry, in real precision = 0.000001L)
@@ -3110,6 +3176,16 @@ if (isInputRange!Source && isSomeChar!(ElementType!Source) && !is(Source == enum
     d = to!double("1.79769e+308");
     assert(to!string(d) == to!string(1.79769e+308));
     assert(to!string(d) == to!string(double.max));
+
+    auto z = real.max / 2L;
+    static assert(is(typeof(z) == real));
+    assert(!isNaN(z));
+    assert(!isInfinity(z));
+    string a = to!string(z);
+    real b = to!real(a);
+    string c = to!string(b);
+
+    assert(c == a, "\n" ~ c ~ "\n" ~ a);
 
     assert(to!string(to!real(to!string(real.max / 2L))) == to!string(real.max / 2L));
 
@@ -3535,7 +3611,7 @@ if (isSomeString!Source && !is(Source == enum) &&
     {
         if (!s.empty && s.front == rbracket)
             break;
-        result ~= parseElement!(ElementType!Target)(s);
+        result ~= parseElement!(WideElementType!Target)(s);
         skipWS(s);
         if (s.empty)
             throw convError!(Source, Target)(s);
@@ -3820,13 +3896,31 @@ if (isInputRange!Source && isSomeChar!(ElementType!Source))
         return isAlpha(c) ? ((c & ~0x20) - ('A' - 10)) : c - '0';
     }
 
+    // We need to do octals separate, because they need a lookahead to find out,
+    // where the escape sequence ends.
+    auto first = s.front;
+    if (first >= '0' && first <= '7')
+    {
+        dchar c1 = s.front;
+        s.popFront();
+        if (s.empty) return c1 - '0';
+        dchar c2 = s.front;
+        if (c2 < '0' || c2 > '7') return c1 - '0';
+        s.popFront();
+        dchar c3 = s.front;
+        if (c3 < '0' || c3 > '7') return 8 * (c1 - '0') + (c2 - '0');
+        s.popFront();
+        if (c1 > '3')
+            throw parseError("Octal sequence is larger than \\377");
+        return 64 * (c1 - '0') + 8 * (c2 - '0') + (c3 - '0');
+    }
+
     dchar result;
 
-    switch (s.front)
+    switch (first)
     {
         case '"':   result = '\"';  break;
         case '\'':  result = '\'';  break;
-        case '0':   result = '\0';  break;
         case '?':   result = '\?';  break;
         case '\\':  result = '\\';  break;
         case 'a':   result = '\a';  break;
@@ -3871,7 +3965,7 @@ if (isInputRange!Source && isSomeChar!(ElementType!Source))
 {
     string[] s1 = [
         `\"`, `\'`, `\?`, `\\`, `\a`, `\b`, `\f`, `\n`, `\r`, `\t`, `\v`, //Normal escapes
-        //`\141`, //@@@9621@@@ Octal escapes.
+        `\141`,
         `\x61`,
         `\u65E5`, `\U00012456`
         //`\&amp;`, `\&quot;`, //@@@9621@@@ Named Character Entities.
@@ -3879,7 +3973,7 @@ if (isInputRange!Source && isSomeChar!(ElementType!Source))
 
     const(dchar)[] s2 = [
         '\"', '\'', '\?', '\\', '\a', '\b', '\f', '\n', '\r', '\t', '\v', //Normal escapes
-        //'\141', //@@@9621@@@ Octal escapes.
+        '\141',
         '\x61',
         '\u65E5', '\U00012456'
         //'\&amp;', '\&quot;', //@@@9621@@@ Named Character Entities.
@@ -3905,7 +3999,8 @@ if (isInputRange!Source && isSomeChar!(ElementType!Source))
         `\x0`,     //Premature hex end
         `\XB9`,    //Not legal hex syntax
         `\u!!`,    //Not a unicode hex
-        `\777`,    //Octal is larger than a byte //Note: Throws, but simply because octals are unsupported
+        `\777`,    //Octal is larger than a byte
+        `\80`,     //Wrong digit at beginning of octal
         `\u123`,   //Premature hex end
         `\U123123` //Premature hex end
     ];
@@ -3959,9 +4054,9 @@ if (isInputRange!Source && isSomeChar!(ElementType!Source) && !is(Source == enum
 // ditto
 Target parseElement(Target, Source)(ref Source s)
 if (isInputRange!Source && isSomeChar!(ElementType!Source) && !is(Source == enum) &&
-    isSomeChar!Target && !is(Target == enum))
+    is(CharTypeOf!Target == dchar) && !is(Target == enum))
 {
-    Target c;
+    Unqual!Target c;
 
     parseCheck!s('\'');
     if (s.empty)
@@ -3984,6 +4079,17 @@ if (isInputRange!Source && isSomeChar!(ElementType!Source) &&
     !isSomeString!Target && !isSomeChar!Target)
 {
     return parse!Target(s);
+}
+
+// Use this when parsing a type that will ultimately be appended to a
+// string.
+package template WideElementType(T)
+{
+    alias E = ElementType!T;
+    static if (isSomeChar!E)
+        alias WideElementType = dchar;
+    else
+        alias WideElementType = E;
 }
 
 
@@ -4651,6 +4757,22 @@ if (is(T == class))
 
 @nogc pure nothrow @safe unittest
 {
+    static class __conv_EmplaceTestClass
+    {
+        int i = 3;
+        this(int i) @nogc @safe pure nothrow
+        {
+            assert(this.i == 3 && i == 5);
+            this.i = i;
+        }
+        this(int i, ref int j) @nogc @safe pure nothrow
+        {
+            assert(i == 5 && j == 6);
+            this.i = i;
+            ++j;
+        }
+    }
+
     int var = 6;
     align(__conv_EmplaceTestClass.alignof) ubyte[__traits(classInstanceSize, __conv_EmplaceTestClass)] buf;
     auto support = (() @trusted => cast(__conv_EmplaceTestClass)(buf.ptr))();
@@ -4718,42 +4840,7 @@ if (!is(T == class))
     assert(u1.a == "hello");
 }
 
-version (unittest) private struct __conv_EmplaceTest
-{
-    int i = 3;
-    this(int i)
-    {
-        assert(this.i == 3 && i == 5);
-        this.i = i;
-    }
-    this(int i, ref int j)
-    {
-        assert(i == 5 && j == 6);
-        this.i = i;
-        ++j;
-    }
 
-@disable:
-    this();
-    this(this);
-    void opAssign();
-}
-
-version (unittest) private class __conv_EmplaceTestClass
-{
-    int i = 3;
-    this(int i) @nogc @safe pure nothrow
-    {
-        assert(this.i == 3 && i == 5);
-        this.i = i;
-    }
-    this(int i, ref int j) @nogc @safe pure nothrow
-    {
-        assert(i == 5 && j == 6);
-        this.i = i;
-        ++j;
-    }
-}
 
 @system unittest // bugzilla 15772
 {
@@ -4888,17 +4975,40 @@ version (unittest) private class __conv_EmplaceTestClass
 
 @system unittest
 {
+    static struct __conv_EmplaceTest
+    {
+        int i = 3;
+        this(int i)
+        {
+            assert(this.i == 3 && i == 5);
+            this.i = i;
+        }
+        this(int i, ref int j)
+        {
+            assert(i == 5 && j == 6);
+            this.i = i;
+            ++j;
+        }
+
+    @disable:
+        this();
+        this(this);
+        void opAssign();
+    }
+
     __conv_EmplaceTest k = void;
     emplace(&k, 5);
     assert(k.i == 5);
-}
 
-@system unittest
-{
     int var = 6;
-    __conv_EmplaceTest k = void;
-    emplace(&k, 5, var);
-    assert(k.i == 5);
+    __conv_EmplaceTest x = void;
+    emplace(&x, 5, var);
+    assert(x.i == 5);
+    assert(var == 7);
+
+    var = 6;
+    auto z = emplace!__conv_EmplaceTest(new void[__conv_EmplaceTest.sizeof], 5, var);
+    assert(z.i == 5);
     assert(var == 7);
 }
 
@@ -5160,7 +5270,7 @@ version (unittest) private class __conv_EmplaceTestClass
     }
 }
 
-version (unittest)
+version (StdUnittest)
 {
     //Ambiguity
     private struct __std_conv_S
@@ -5578,10 +5688,6 @@ pure nothrow @safe /* @nogc */ unittest
 
 @system unittest
 {
-    int var = 6;
-    auto k = emplace!__conv_EmplaceTest(new void[__conv_EmplaceTest.sizeof], 5, var);
-    assert(k.i == 5);
-    assert(var == 7);
 }
 
 @system unittest

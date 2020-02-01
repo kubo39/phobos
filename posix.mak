@@ -150,7 +150,7 @@ ifdef ENABLE_COVERAGE
 override DFLAGS  += -cov
 endif
 
-UDFLAGS=-unittest
+UDFLAGS=-unittest -version=StdUnittest
 
 # Set DOTOBJ and DOTEXE
 ifeq (,$(findstring win,$(OS)))
@@ -292,9 +292,14 @@ else
 all : lib
 endif
 
+ifneq (,$(findstring Darwin_64_32, $(PWD)))
+install:
+	echo "Darwin_64_32_disabled"
+else
 install :
 	$(MAKE) -f $(MAKEFILE) OS=$(OS) MODEL=$(MODEL) BUILD=release INSTALL_DIR=$(INSTALL_DIR) \
 		DMD=$(DMD) install2
+endif
 
 .PHONY : unittest
 ifeq (1,$(BUILD_WAS_SPECIFIED))
@@ -561,7 +566,7 @@ dscanner:
 
 style_lint: dscanner $(LIB)
 	@echo "Check for trailing whitespace"
-	grep -nr '[[:blank:]]$$' etc std ; test $$? -eq 1
+	grep -nr '[[:blank:]]$$' $$(find etc std -name '*.d'); test $$? -eq 1
 
 	@echo "Enforce whitespace before opening parenthesis"
 	grep -nrE "\<(for|foreach|foreach_reverse|if|while|switch|catch|version)\(" $$(find etc std -name '*.d') ; test $$? -eq 1
@@ -646,9 +651,9 @@ betterc: betterc-phobos-tests
 	@# Due to the FORCE rule on druntime, make will always try to rebuild Phobos (even as an order-only dependency)
 	@# However, we still need to ensure that the test_extractor is built once
 	@[ -f "$(TESTS_EXTRACTOR)" ] || ${MAKE} -f posix.mak "$(TESTS_EXTRACTOR)"
-	@$(TESTS_EXTRACTOR) --betterC --attributes betterC \
+	$(TESTS_EXTRACTOR) --betterC --attributes betterC \
 		--inputdir  $< --outputdir $(BETTERCTESTS_DIR)
-	@$(DMD) $(DFLAGS) $(NODEFAULTLIB) -betterC $(UDFLAGS) -run $(BETTERCTESTS_DIR)/$(subst /,_,$<)
+	$(DMD) $(DFLAGS) $(NODEFAULTLIB) -betterC -run $(BETTERCTESTS_DIR)/$(subst /,_,$<)
 
 ################################################################################
 

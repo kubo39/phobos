@@ -304,14 +304,6 @@ public:
     }
 }
 
-// @@@DEPRECATED_2019-01@@@
-deprecated("Use .byRecord")
-struct ByRecord(Fields...)
-{
-    ByRecordImpl!Fields payload;
-    alias payload this;
-}
-
 template byRecord(Fields...)
 {
     auto byRecord(File f, string format)
@@ -474,11 +466,18 @@ Assigns a file to another. The target of the assignment gets detached
 from whatever file it was attached to, and attaches itself to the new
 file.
  */
-    void opAssign(File rhs) @safe
+    ref File opAssign(File rhs) @safe return
     {
         import std.algorithm.mutation : swap;
 
         swap(this, rhs);
+        return this;
+    }
+
+    @safe unittest // bugzilla 20129
+    {
+        File[int] aa;
+        aa.require(0, File.init);
     }
 
 /**
@@ -1091,6 +1090,14 @@ Throws: `Exception` if the file is not opened.
         import std.conv : to, text;
         import std.exception : enforce, errnoEnforce;
 
+        // Some libc sanitize the whence input (e.g. glibc), but some don't,
+        // e.g. Microsoft runtime crashes on an invalid origin,
+        // and Musl additionally accept SEEK_DATA & SEEK_HOLE (Linux extension).
+        // To provide a consistent behavior cross platform, we use the glibc check
+        // See also https://issues.dlang.org/show_bug.cgi?id=19797
+        enforce(origin == SEEK_SET || origin == SEEK_CUR ||  origin == SEEK_END,
+                "Invalid `origin` argument passed to `seek`, must be one of: SEEK_SET, SEEK_CUR, SEEK_END");
+
         enforce(isOpen, "Attempting to seek() in an unopened file");
         version (Windows)
         {
@@ -1098,9 +1105,6 @@ Throws: `Exception` if the file is not opened.
             {
                 alias fseekFun = _fseeki64;
                 alias off_t = long;
-                // Issue 19797
-                enforce(origin >= SEEK_SET && origin <= SEEK_END,
-                        "Could not seek in file `"~_name~"' (Invalid argument)");
             }
             else
             {
@@ -1144,7 +1148,8 @@ Throws: `Exception` if the file is not opened.
         // f.rawWrite("abcdefghijklmnopqrstuvwxyz");
         // f.seek(-3, SEEK_END);
         // assert(f.readln() == "xyz");
-        assertThrown(f.seek(0, 3));
+
+        assertThrown(f.seek(0, ushort.max));
     }
 
 /**
@@ -1682,13 +1687,14 @@ must copy the previous contents if you wish to retain them.
 
 Params:
 buf = Buffer used to store the resulting line data. buf is
-resized as necessary.
+enlarged if necessary, then set to the slice exactly containing the line.
 terminator = Line terminator (by default, `'\n'`). Use
 $(REF newline, std,ascii) for portability (unless the file was opened in
 text mode).
 
 Returns:
-0 for end of file, otherwise number of characters read
+0 for end of file, otherwise number of characters read.
+The return value will always be equal to `buf.length`.
 
 Throws: `StdioException` on I/O error, or `UnicodeException` on Unicode
 conversion error.
@@ -2198,14 +2204,6 @@ Allows to directly use range operations on lines of a file.
         }
     }
 
-    // @@@DEPRECATED_2019-01@@@
-    deprecated("Use .byLine")
-    struct ByLine(Char, Terminator)
-    {
-        ByLineImpl!(Char, Terminator) payload;
-        alias payload this;
-    }
-
 /**
 Returns an $(REF_ALTTEXT input range, isInputRange, std,range,primitives)
 set up to read from the file handle one line at a time.
@@ -2304,6 +2302,7 @@ the contents may well have changed).
         static import std.file;
         auto deleteme = testFilename();
         std.file.write(deleteme, "Line 1\nLine 2\nLine 3\n");
+        scope(success) std.file.remove(deleteme);
 
         auto f = File(deleteme);
         f.byLine();
@@ -2697,14 +2696,6 @@ $(REF readText, std,file)
         }
     }
 
-    // @@@DEPRECATED_2019-01@@@
-    deprecated("Use .byChunk")
-    struct ByChunk
-    {
-        ByChunkImpl payload;
-        alias payload this;
-    }
-
 /**
 Returns an $(REF_ALTTEXT input range, isInputRange, std,range,primitives)
 set up to read from the file handle a chunk at a time.
@@ -2954,7 +2945,7 @@ is empty, throws an `Exception`. In case of an I/O error throws
             }
             else static if (c.sizeof == 2)
             {
-                import std.utf : encode;
+                import std.utf : encode, decode;
 
                 if (orientation_ <= 0)
                 {
@@ -2974,7 +2965,8 @@ is empty, throws an `Exception`. In case of an I/O error throws
                         if (highSurrogate != '\0')
                         {
                             immutable wchar[2] rbuf = [highSurrogate, c];
-                            d = rbuf[].front;
+                            size_t index = 0;
+                            d = decode(rbuf[], index);
                             highSurrogate = 0;
                         }
                         char[4] wbuf;
@@ -5485,7 +5477,7 @@ version (linux)
     }
 }
 
-version (unittest) private string testFilename(string file = __FILE__, size_t line = __LINE__) @safe
+version (StdUnittest) private string testFilename(string file = __FILE__, size_t line = __LINE__) @safe
 {
     import std.conv : text;
     import std.file : deleteme;

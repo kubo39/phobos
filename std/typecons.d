@@ -935,7 +935,7 @@ if (distinctFieldNames!(Specs))
          * It is an compile-time error to pass more names than
          * there are members of the $(LREF Tuple).
          */
-        ref rename(names...)() return
+        ref rename(names...)() inout return
         if (names.length == 0 || allSatisfy!(isSomeString, typeof(names)))
         {
             import std.algorithm.comparison : equal;
@@ -1007,6 +1007,10 @@ if (distinctFieldNames!(Specs))
                 .map!(t => t.a * t.b)
                 .sum;
             assert(res == 68);
+
+            const tup = Tuple!(int, "a", int, "b")(2, 3);
+            const renamed = tup.rename!("c", "d");
+            assert(renamed.c + renamed.d == 5);
         }
 
         /**
@@ -1019,7 +1023,7 @@ if (distinctFieldNames!(Specs))
          * The same rules for empty strings apply as for the variadic
          * template overload of $(LREF _rename).
         */
-        ref rename(alias translate)()
+        ref rename(alias translate)() inout
         if (is(typeof(translate) : V[K], V, K) && isSomeString!V &&
                 (isSomeString!K || is(K : size_t)))
         {
@@ -1087,6 +1091,11 @@ if (distinctFieldNames!(Specs))
             auto t2Named = t2.rename!(["a": "b", "b": "c"]);
             assert(t2Named.b == 3);
             assert(t2Named.c == 4);
+
+            const t3 = Tuple!(int, "a", int, "b")(3, 4);
+            const t3Named = t3.rename!(["a": "b", "b": "c"]);
+            assert(t3Named.b == 3);
+            assert(t3Named.c == 4);
         }
 
         ///
@@ -1970,7 +1979,7 @@ private template ReverseTupleSpecs(T...)
 
 @safe unittest
 {
-    class C {}
+    class C { override size_t toHash() const nothrow @safe { return 0; } }
     Tuple!(Rebindable!(const C)) a;
     Tuple!(const C) b;
     a = b;
@@ -2512,10 +2521,10 @@ Rebindable!T rebindable(T)(Rebindable!T obj)
 template UnqualRef(T)
 if (is(T == class) || is(T == interface))
 {
-    static if (is(T == const U, U)
-        || is(T == immutable U, U)
-        || is(T == shared U, U)
-        || is(T == const shared U, U))
+    static if (is(T == immutable U, U)
+        || is(T == const shared U, U)
+        || is(T == const U, U)
+        || is(T == shared U, U))
     {
         struct UnqualRef
         {
@@ -2694,7 +2703,7 @@ Params:
 
     /// Ditto
     bool opEquals(U)(auto ref const(U) rhs) const
-    if (is(typeof(this.get == rhs)))
+    if (!is(U : typeof(this)) && is(typeof(this.get == rhs)))
     {
         return _isNull ? false : rhs == _value.payload;
     }
@@ -2813,35 +2822,6 @@ Params:
             put(writer, "Nullable.null");
         else
             formatValue(writer, _value.payload, fmt);
-    }
-
-    //@@@DEPRECATED_2.086@@@
-    deprecated("To be removed after 2.086. Please use the output range overload instead.")
-    void toString()(scope void delegate(const(char)[]) sink, scope const ref FormatSpec!char fmt)
-    {
-        if (isNull)
-        {
-            sink.formatValue("Nullable.null", fmt);
-        }
-        else
-        {
-            sink.formatValue(_value.payload, fmt);
-        }
-    }
-
-    // Issue 14940
-    //@@@DEPRECATED_2.086@@@
-    deprecated("To be removed after 2.086. Please use the output range overload instead.")
-    void toString()(scope void delegate(const(char)[]) @safe sink, scope const ref FormatSpec!char fmt)
-    {
-        if (isNull)
-        {
-            sink.formatValue("Nullable.null", fmt);
-        }
-        else
-        {
-            sink.formatValue(_value.payload, fmt);
-        }
     }
 
 /**
@@ -4395,6 +4375,17 @@ alias BlackHole(Base) = AutoImplement!(Base, generateEmptyFunction, isAbstractFu
     BlackHole!Foo o;
 }
 
+nothrow pure @nogc @safe unittest
+{
+    static interface I
+    {
+        I foo() nothrow pure @nogc @safe return scope;
+    }
+
+    scope cb = new BlackHole!I();
+    cb.foo();
+}
+
 
 /**
 `WhiteHole!Base` is a subclass of `Base` which automatically implements
@@ -4428,10 +4419,25 @@ alias WhiteHole(Base) = AutoImplement!(Base, generateAssertTrap, isAbstractFunct
     assertThrown!NotImplementedError(c.notYetImplemented()); // throws an Error
 }
 
+// https://issues.dlang.org/show_bug.cgi?id=20232
+nothrow pure @safe unittest
+{
+    static interface I
+    {
+        I foo() nothrow pure @safe return scope;
+    }
+
+    if (0) // Just checking attribute interference
+    {
+        scope cw = new WhiteHole!I();
+        cw.foo();
+    }
+}
+
 // / ditto
 class NotImplementedError : Error
 {
-    this(string method)
+    this(string method) nothrow pure @safe
     {
         super(method ~ " is not implemented");
     }
@@ -4977,7 +4983,7 @@ private static:
     alias Implementation = AutoImplement!(Issue17177, how, templateNot!isFinalFunction);
 }
 
-version (unittest)
+version (StdUnittest)
 {
     // Issue 10647
     // Add prefix "issue10647_" as a workaround for issue 1238
@@ -5074,6 +5080,7 @@ private static:
     // Internal stuffs
     //:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::://
     import std.format;
+    alias format = std.format.format;
 
     enum CONSTRUCTOR_NAME = "__ctor";
 
@@ -5204,6 +5211,8 @@ private static:
                 if (atts & FA.property) poatts ~= " @property";
                 if (atts & FA.safe    ) poatts ~= " @safe";
                 if (atts & FA.trusted ) poatts ~= " @trusted";
+                if (atts & FA.scope_ )  poatts ~= " scope";
+                if (atts & FA.return_ ) poatts ~= " return";
                 return poatts;
             }
             enum postAtts = make_postAtts();
@@ -5990,16 +5999,14 @@ private template TypeMod(T)
     enum TypeMod = cast(TypeModifier)(mod1 | mod2);
 }
 
-version (unittest)
+@system unittest
 {
-    private template UnittestFuncInfo(alias f)
+    template UnittestFuncInfo(alias f)
     {
         enum name = __traits(identifier, f);
         alias type = FunctionTypeOf!f;
     }
-}
-@system unittest
-{
+
     class A
     {
         int draw() { return 1; }
@@ -6685,7 +6692,7 @@ mixin template Proxy(alias a)
 
         static if (accessibleFrom!(const typeof(this)))
         {
-            override hash_t toHash() const nothrow @safe
+            override size_t toHash() const nothrow @safe
             {
                 static if (__traits(compiles, .hashOf(a)))
                     return .hashOf(a);
@@ -6715,7 +6722,6 @@ mixin template Proxy(alias a)
         }
 
         auto ref opCmp(this X, B)(auto ref B b)
-          if (!is(typeof(a.opCmp(b))) || !is(typeof(b.opCmp(a))))
         {
             static if (is(typeof(a.opCmp(b))))
                 return a.opCmp(b);
@@ -6729,7 +6735,7 @@ mixin template Proxy(alias a)
 
         static if (accessibleFrom!(const typeof(this)))
         {
-            hash_t toHash() const nothrow @safe
+            size_t toHash() const nothrow @safe
             {
                 static if (__traits(compiles, .hashOf(a)))
                     return .hashOf(a);
@@ -6791,7 +6797,7 @@ mixin template Proxy(alias a)
 
     auto ref opOpAssign     (string op, this X, V      )(auto ref V v)
     {
-        return mixin("a "      ~op~"= v");
+        return mixin("a = a "~op~" v");
     }
     auto ref opIndexOpAssign(string op, this X, V, D...)(auto ref V v, auto ref D i)
     {
@@ -7500,6 +7506,16 @@ struct Typedef(T, T init = T.init, string cookie=null)
     static assert(!is(MoneyEuros == MoneyDollars));
 }
 
+// issue 12461
+@safe unittest
+{
+    alias Int = Typedef!int;
+
+    Int a, b;
+    a += b;
+    assert(a == 0);
+}
+
 /**
 Get the underlying type which a `Typedef` wraps.
 If `T` is not a `Typedef` it will alias itself to `T`.
@@ -7746,6 +7762,24 @@ template TypedefType(T)
             assert(t.to!string() == itd.to!string());
         }
     }}
+}
+
+@safe @nogc unittest // typedef'ed type with custom operators
+{
+    static struct MyInt
+    {
+        int value;
+        int opCmp(MyInt other)
+        {
+            if (value < other.value)
+                return -1;
+            return !(value == other.value);
+        }
+    }
+
+    auto m1 = Typedef!MyInt(MyInt(1));
+    auto m2 = Typedef!MyInt(MyInt(2));
+    assert(m1 < m2);
 }
 
 /**
@@ -8780,7 +8814,7 @@ template ReplaceTypeUnless(alias pred, From, To, T...)
             static assert(0, "Function types not supported," ~
                 " use a function pointer type instead of " ~ T[0].stringof);
         }
-        else static if (is(T[0] : U!V, alias U, V...))
+        else static if (is(T[0] == U!V, alias U, V...))
         {
             template replaceTemplateArgs(T...)
             {
@@ -9005,6 +9039,28 @@ private template replaceTypeInFunctionTypeUnless(alias pred, From, To, fun)
     alias B = void delegate(int) const;
     alias A = ReplaceType!(float, int, ConstDg);
     static assert(is(B == A));
+}
+
+
+@safe unittest // Bugzilla 19696
+{
+    static struct T(U) {}
+    static struct S { T!int t; alias t this; }
+    static assert(is(ReplaceType!(float, float, S) == S));
+}
+
+@safe unittest // Bugzilla 19697
+{
+    class D(T) {}
+    class C : D!C {}
+    static assert(is(ReplaceType!(float, float, C)));
+}
+
+@safe unittest // Bugzilla 16132
+{
+    interface I(T) {}
+    class C : I!int {}
+    static assert(is(ReplaceType!(int, string, C) == C));
 }
 
 /**

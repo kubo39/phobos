@@ -350,6 +350,7 @@ version (Posix) private enum InternalError : ubyte
     sysconf,
     doubleFork,
     pthread_sigmask,
+    malloc,
 }
 
 /*
@@ -715,9 +716,9 @@ private Pid spawnProcessImpl(scope const(char[])[] args,
             if (!(config & Config.inheritFDs))
             {
                 // NOTE: malloc() and getrlimit() are not on the POSIX async
-                // signal safe functions list, but practically this should not
-                // be a problem. Tha Java VM and CPython also use malloc() in
-                // its own implementation.
+                // signal safe functions list, but practically this should
+                // not be a problem. Java VM and CPython also use malloc()
+                // in its own implementation via opendir().
                 import core.stdc.stdlib : malloc;
                 import core.sys.posix.poll : pollfd, poll, POLLNVAL;
                 import core.sys.posix.sys.resource : rlimit, getrlimit, RLIMIT_NOFILE;
@@ -735,6 +736,10 @@ private Pid spawnProcessImpl(scope const(char[])[] args,
 
                 // Call poll() to see which ones are actually open:
                 auto pfds = cast(pollfd*) malloc(pollfd.sizeof * maxToClose);
+                if (pfds is null)
+                {
+                    abortOnError(forkPipeOut, InternalError.malloc, .errno);
+                }
                 foreach (i; 0 .. maxToClose)
                 {
                     pfds[i].fd = i + 3;
@@ -858,6 +863,8 @@ private Pid spawnProcessImpl(scope const(char[])[] args,
                 case InternalError.pthread_sigmask:
                     errorMsg = "pthread_sigmask failed";
                     break;
+                case InternalError.malloc:
+                    errorMsg = "Failed to allocate memory";
                 case InternalError.noerror:
                     assert(false);
             }
@@ -1341,7 +1348,7 @@ version (Posix) @system unittest
             wait(pid);
         else
             // We need to wait a little to ensure that the process has finished and data was written to files
-            Thread.sleep(2.seconds);
+            Thread.sleep(500.msecs);
         assert(readText(patho).chomp() == "INPUT output bar");
         assert(readText(pathe).chomp().stripRight() == "INPUT error baz");
         remove(pathi);
@@ -1367,8 +1374,9 @@ version (Posix) @system unittest
     version (Posix)
     {
         import std.path : buildPath;
-        import std.file : remove, write, setAttributes;
+        import std.file : remove, write, setAttributes, tempDir;
         import core.sys.posix.sys.stat : S_IRUSR, S_IWUSR, S_IXUSR, S_IRGRP, S_IXGRP, S_IROTH, S_IXOTH;
+        import std.conv : to;
         string deleteme = buildPath(tempDir(), "deleteme.std.process.unittest.pid") ~ to!string(thisProcessID);
         write(deleteme, "");
         scope(exit) remove(deleteme);
@@ -1381,6 +1389,7 @@ version (Posix) @system unittest
 @system unittest // Specifying a working directory.
 {
     import std.path;
+    import std.file;
     TestScript prog = "echo foo>bar";
 
     auto directory = uniqueTempPath();
@@ -1395,6 +1404,7 @@ version (Posix) @system unittest
 @system unittest // Specifying a bad working directory.
 {
     import std.exception : assertThrown;
+    import std.file;
     TestScript prog = "echo";
 
     auto directory = uniqueTempPath();
@@ -1434,6 +1444,7 @@ version (Posix) @system unittest
 @system unittest // Reopening the standard streams (issue 13258)
 {
     import std.string;
+    import std.file;
     void fun()
     {
         spawnShell("echo foo").wait();
@@ -1564,6 +1575,7 @@ version (Windows)
 @system unittest
 {
     import std.string;
+    import std.conv : text;
     TestScript prog = "echo %0 %*";
     auto outputFn = uniqueTempPath();
     scope(exit) if (exists(outputFn)) remove(outputFn);
@@ -1702,12 +1714,12 @@ final class Pid
     */
     // Note: Since HANDLE is a reference, this function cannot be const.
     version (Windows)
-    @property HANDLE osHandle() @safe pure nothrow
+    @property HANDLE osHandle() @nogc @safe pure nothrow
     {
         return _handle;
     }
     else version (Posix)
-    @property pid_t osHandle() @safe pure nothrow
+    @property pid_t osHandle() @nogc @safe pure nothrow
     {
         return _processID;
     }
@@ -2065,13 +2077,13 @@ void kill(Pid pid, int codeOrSignal)
     version (Android)
         Thread.sleep(dur!"msecs"(5));
     else
-        Thread.sleep(dur!"seconds"(1));
+        Thread.sleep(dur!"msecs"(500));
     kill(pid);
     version (Windows)    assert(wait(pid) == 1);
     else version (Posix) assert(wait(pid) == -SIGTERM);
 
     pid = spawnProcess(prog.path);
-    Thread.sleep(dur!"seconds"(1));
+    Thread.sleep(dur!"msecs"(500));
     auto s = tryWait(pid);
     assert(!s.terminated && s.status == 0);
     assertThrown!ProcessException(kill(pid, -123)); // Negative code not allowed.
@@ -2095,7 +2107,7 @@ void kill(Pid pid, int codeOrSignal)
     This leads to the annoying message like "/bin/sh: 0: Can't open /tmp/std.process temporary file" to appear when running tests.
     It does not happen in unittests with non-detached processes because we always wait() for them to finish.
     */
-    Thread.sleep(1.seconds);
+    Thread.sleep(500.msecs);
     assert(!pid.owned);
     version (Windows) assert(pid.osHandle == INVALID_HANDLE_VALUE);
     assertThrown!ProcessException(wait(pid));
@@ -2952,7 +2964,7 @@ version (Windows) private immutable string shellSwitch = "/C";
 // file. On Windows the file name gets a .cmd extension, while on
 // POSIX its executable permission bit is set.  The file is
 // automatically deleted when the object goes out of scope.
-version (unittest)
+version (StdUnittest)
 private struct TestScript
 {
     this(string code) @system
@@ -2975,6 +2987,7 @@ private struct TestScript
         version (Posix)
         {
             import core.sys.posix.sys.stat : chmod;
+            import std.conv : octal;
             chmod(path.tempCString(), octal!777);
         }
     }
@@ -2995,7 +3008,7 @@ private struct TestScript
     string path;
 }
 
-version (unittest)
+version (StdUnittest)
 private string uniqueTempPath() @safe
 {
     import std.file : tempDir;
@@ -3294,7 +3307,7 @@ if (is(typeof(allocator(size_t.init)[0] = char.init)))
     return buf;
 }
 
-version (Windows) version (unittest)
+version (Windows) version (StdUnittest)
 {
 private:
     import core.stdc.stddef;
@@ -3308,6 +3321,7 @@ private:
     {
         import std.algorithm.iteration : map;
         import std.array : array;
+        import std.conv : to;
         auto lpCommandLine = (to!(WCHAR[])(line) ~ '\0').ptr;
         int numArgs;
         auto args = CommandLineToArgvW(lpCommandLine, &numArgs);
@@ -3319,6 +3333,7 @@ private:
 
     @system unittest
     {
+        import std.conv : text;
         string[] testStrings = [
             `Hello`,
             `Hello, world`,
@@ -3703,11 +3718,11 @@ static:
             if (GetEnvironmentVariableW(name.tempCStringW, null, 0) > 0)
                 return true;
             immutable err = GetLastError();
+            if (err == NO_ERROR)
+                return true; // zero-length environment variable on Wine / XP
             if (err == ERROR_ENVVAR_NOT_FOUND)
                 return false;
-            // some other windows error. Might actually be NO_ERROR, because
-            // GetEnvironmentVariable doesn't specify whether it sets on all
-            // failures
+            // Some other Windows error, throw.
             throw new WindowsException(err);
         }
         else static assert(0);
@@ -3811,12 +3826,10 @@ private:
                 immutable err = GetLastError();
                 if (err == ERROR_ENVVAR_NOT_FOUND)
                     return false;
-                // some other windows error. Might actually be NO_ERROR, because
-                // GetEnvironmentVariable doesn't specify whether it sets on all
-                // failures
-                throw new WindowsException(err);
+                if (err != NO_ERROR) // Some other Windows error, throw.
+                    throw new WindowsException(err);
             }
-            if (len == 1)
+            if (len <= 1)
             {
                 value = "";
                 return true;
@@ -3982,11 +3995,6 @@ version (Posix)
 {
     import core.sys.posix.stdlib;
 }
-version (unittest)
-{
-    import std.conv, std.file, std.random;
-}
-
 
 private void toAStringz(in string[] a, const(char)**az)
 {
@@ -4125,7 +4133,10 @@ extern(C)
 
 private int execv_(in string pathname, in string[] argv)
 {
+    import core.exception : OutOfMemoryError;
+    import std.exception : enforce;
     auto argv_ = cast(const(char)**)core.stdc.stdlib.malloc((char*).sizeof * (1 + argv.length));
+    enforce!OutOfMemoryError(argv_ !is null, "Out of memory in std.process.");
     scope(exit) core.stdc.stdlib.free(argv_);
 
     toAStringz(argv, argv_);
@@ -4135,9 +4146,13 @@ private int execv_(in string pathname, in string[] argv)
 
 private int execve_(in string pathname, in string[] argv, in string[] envp)
 {
+    import core.exception : OutOfMemoryError;
+    import std.exception : enforce;
     auto argv_ = cast(const(char)**)core.stdc.stdlib.malloc((char*).sizeof * (1 + argv.length));
+    enforce!OutOfMemoryError(argv_ !is null, "Out of memory in std.process.");
     scope(exit) core.stdc.stdlib.free(argv_);
     auto envp_ = cast(const(char)**)core.stdc.stdlib.malloc((char*).sizeof * (1 + envp.length));
+    enforce!OutOfMemoryError(envp_ !is null, "Out of memory in std.process.");
     scope(exit) core.stdc.stdlib.free(envp_);
 
     toAStringz(argv, argv_);
@@ -4148,7 +4163,10 @@ private int execve_(in string pathname, in string[] argv, in string[] envp)
 
 private int execvp_(in string pathname, in string[] argv)
 {
+    import core.exception : OutOfMemoryError;
+    import std.exception : enforce;
     auto argv_ = cast(const(char)**)core.stdc.stdlib.malloc((char*).sizeof * (1 + argv.length));
+    enforce!OutOfMemoryError(argv_ !is null, "Out of memory in std.process.");
     scope(exit) core.stdc.stdlib.free(argv_);
 
     toAStringz(argv, argv_);
@@ -4195,9 +4213,13 @@ version (Posix)
 }
 else version (Windows)
 {
+    import core.exception : OutOfMemoryError;
+    import std.exception : enforce;
     auto argv_ = cast(const(char)**)core.stdc.stdlib.malloc((char*).sizeof * (1 + argv.length));
+    enforce!OutOfMemoryError(argv_ !is null, "Out of memory in std.process.");
     scope(exit) core.stdc.stdlib.free(argv_);
     auto envp_ = cast(const(char)**)core.stdc.stdlib.malloc((char*).sizeof * (1 + envp.length));
+    enforce!OutOfMemoryError(envp_ !is null, "Out of memory in std.process.");
     scope(exit) core.stdc.stdlib.free(envp_);
 
     toAStringz(argv, argv_);

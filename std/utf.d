@@ -61,6 +61,7 @@ $(TR $(TD Miscellaneous) $(TD
 module std.utf;
 
 import std.exception : basicExceptionCtors;
+import core.exception : UnicodeException;
 import std.meta : AliasSeq;
 import std.range.primitives;
 import std.traits : isAutodecodableString, isPointer, isSomeChar,
@@ -71,7 +72,7 @@ import std.typecons : Flag, Yes, No;
 /++
     Exception thrown on errors in std.utf functions.
   +/
-class UTFException : Exception
+class UTFException : UnicodeException
 {
     import core.internal.string : unsignedToTempString, UnsignedStringBuf;
 
@@ -97,7 +98,7 @@ class UTFException : Exception
     this(string msg, string file = __FILE__, size_t line = __LINE__,
          Throwable next = null) @nogc @safe pure nothrow
     {
-        super(msg, file, line, next);
+        super(msg, 0, file, line, next);
     }
     /// ditto
     this(string msg, size_t index, string file = __FILE__,
@@ -105,7 +106,7 @@ class UTFException : Exception
     {
         UnsignedStringBuf buf = void;
         msg ~= " (at index " ~ unsignedToTempString(index, buf, 10) ~ ")";
-        super(msg, file, line, next);
+        super(msg, index, file, line, next);
     }
 
     /**
@@ -1857,7 +1858,7 @@ unittest
 }
 
 
-version (unittest) private void testDecode(R)(R range,
+version (StdUnittest) private void testDecode(R)(R range,
                                              size_t index,
                                              dchar expectedChar,
                                              size_t expectedIndex,
@@ -1887,7 +1888,7 @@ version (unittest) private void testDecode(R)(R range,
     }
 }
 
-version (unittest) private void testDecodeFront(R)(ref R range,
+version (StdUnittest) private void testDecodeFront(R)(ref R range,
                                                   dchar expectedChar,
                                                   size_t expectedNumCodeUnits,
                                                   size_t line = __LINE__)
@@ -1913,7 +1914,7 @@ version (unittest) private void testDecodeFront(R)(ref R range,
     }
 }
 
-version (unittest) private void testDecodeBack(R)(ref R range,
+version (StdUnittest) private void testDecodeBack(R)(ref R range,
                                                  dchar expectedChar,
                                                  size_t expectedNumCodeUnits,
                                                  size_t line = __LINE__)
@@ -1945,7 +1946,7 @@ version (unittest) private void testDecodeBack(R)(ref R range,
     }
 }
 
-version (unittest) private void testAllDecode(R)(R range,
+version (StdUnittest) private void testAllDecode(R)(R range,
                                                 dchar expectedChar,
                                                 size_t expectedIndex,
                                                 size_t line = __LINE__)
@@ -1959,7 +1960,7 @@ version (unittest) private void testAllDecode(R)(R range,
     testDecodeFront(range, expectedChar, expectedIndex, line);
 }
 
-version (unittest) private void testBadDecode(R)(R range, size_t index, size_t line = __LINE__)
+version (StdUnittest) private void testBadDecode(R)(R range, size_t index, size_t line = __LINE__)
 {
     import core.exception : AssertError;
     import std.exception : assertThrown, enforce;
@@ -1986,7 +1987,7 @@ version (unittest) private void testBadDecode(R)(R range, size_t index, size_t l
         assertThrown!UTFException(decodeFront(range, index), null, __FILE__, line);
 }
 
-version (unittest) private void testBadDecodeBack(R)(R range, size_t line = __LINE__)
+version (StdUnittest) private void testBadDecodeBack(R)(R range, size_t line = __LINE__)
 {
     // This condition is to allow unit testing all `decode` functions together
     static if (!isBidirectionalRange!R)
@@ -3390,7 +3391,7 @@ if (isSomeChar!C)
 
 
 // Ranges of code units for testing.
-version (unittest)
+version (StdUnittest)
 {
 private:
     struct InputCU(C)
@@ -4147,7 +4148,7 @@ pure @safe nothrow @nogc unittest
     foreach (c; s[].byDchar()) { }
 }
 
-version (unittest)
+version (StdUnittest)
 private int impureVariable;
 
 @system unittest
@@ -4176,15 +4177,24 @@ private int impureVariable;
  * Iterate an $(REF_ALTTEXT input range, isInputRange, std,range,primitives)
  * of characters by char type `C` by encoding the elements of the range.
  *
- * UTF sequences that cannot be converted to the specified encoding are
+ * UTF sequences that cannot be converted to the specified encoding are either
  * replaced by U+FFFD per "5.22 Best Practice for U+FFFD Substitution"
- * of the Unicode Standard 6.2. Hence byUTF is not symmetric.
+ * of the Unicode Standard 6.2 or result in a thrown UTFException.
+ *  Hence byUTF is not symmetric.
  * This algorithm is lazy, and does not allocate memory.
  * `@nogc`, `pure`-ity, `nothrow`, and `@safe`-ty are inferred from the
  * `r` parameter.
  *
  * Params:
  *      C = `char`, `wchar`, or `dchar`
+ *      useReplacementDchar = UseReplacementDchar.yes means replace invalid UTF with `replacementDchar`,
+ *                            UseReplacementDchar.no means throw `UTFException` for invalid UTF
+ *
+ * Throws:
+ *      `UTFException` if invalid UTF sequence and `useReplacementDchar` is set to `UseReplacementDchar.yes`
+ *
+ * GC:
+ *      Does not use GC if `useReplacementDchar` is set to `UseReplacementDchar.no`
  *
  * Returns:
  *      A forward range if `R` is a range and not auto-decodable, as defined by
@@ -4197,7 +4207,7 @@ private int impureVariable;
  *
  *      Otherwise, an input range of characters.
  */
-template byUTF(C)
+template byUTF(C, UseReplacementDchar useReplacementDchar = Yes.useReplacementDchar)
 if (isSomeChar!C)
 {
     static if (!is(Unqual!C == C))
@@ -4259,7 +4269,7 @@ if (isSomeChar!C)
                         }
                         else
                         {
-                            buff = () @trusted { return decodeFront!(Yes.useReplacementDchar)(r); }();
+                            buff = () @trusted { return decodeFront!(useReplacementDchar)(r); }();
                         }
                     }
                     return cast(dchar) buff;
@@ -4335,8 +4345,8 @@ if (isSomeChar!C)
                                 dchar dc = c;
                             }
                             else
-                                dchar dc = () @trusted { return decodeFront!(Yes.useReplacementDchar)(r); }();
-                            fill = cast(ushort) encode!(Yes.useReplacementDchar)(buf, dc);
+                                dchar dc = () @trusted { return decodeFront!(useReplacementDchar)(r); }();
+                            fill = cast(ushort) encode!(useReplacementDchar)(buf, dc);
                         }
                     }
                     return buf[pos];
@@ -4375,13 +4385,23 @@ if (isSomeChar!C)
     import std.algorithm.comparison : equal;
 
     // hellö as a range of `char`s, which are UTF-8
-    "hell\u00F6".byUTF!char().equal(['h', 'e', 'l', 'l', 0xC3, 0xB6]);
+    assert("hell\u00F6".byUTF!char().equal(['h', 'e', 'l', 'l', 0xC3, 0xB6]));
 
     // `wchar`s are able to hold the ö in a single element (UTF-16 code unit)
-    "hell\u00F6".byUTF!wchar().equal(['h', 'e', 'l', 'l', 'ö']);
+    assert("hell\u00F6".byUTF!wchar().equal(['h', 'e', 'l', 'l', 'ö']));
 
     // 𐐷 is four code units in UTF-8, two in UTF-16, and one in UTF-32
-    "𐐷".byUTF!char().equal([0xF0, 0x90, 0x90, 0xB7]);
-    "𐐷".byUTF!wchar().equal([0xD801, 0xDC37]);
-    "𐐷".byUTF!dchar().equal([0x00010437]);
+    assert("𐐷".byUTF!char().equal([0xF0, 0x90, 0x90, 0xB7]));
+    assert("𐐷".byUTF!wchar().equal([0xD801, 0xDC37]));
+    assert("𐐷".byUTF!dchar().equal([0x00010437]));
+}
+
+///
+@safe unittest
+{
+    import std.algorithm.comparison : equal;
+    import std.exception : assertThrown;
+
+    assert("hello\xF0betty".byChar.byUTF!(dchar, UseReplacementDchar.yes).equal("hello\uFFFDetty"));
+    assertThrown!UTFException("hello\xF0betty".byChar.byUTF!(dchar, UseReplacementDchar.no).equal("hello betty"));
 }
