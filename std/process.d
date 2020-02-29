@@ -496,19 +496,6 @@ private Pid spawnProcessImpl(scope const(char[])[] args,
                 sigset_t oldmask;
             }
 
-            // Add a slack area for child's stack.
-            size_t argvSize = (argz.length * (void*).sizeof) + 512;
-            argvSize += (32 * 1024);
-
-            size_t stackSize = argvSize;
-            immutable pageSize = sysconf(_SC_PAGESIZE);
-            stackSize = (stackSize + pageSize) & ~(pageSize - 1);
-            void* stack = mmap(null, stackSize, PROT_READ | PROT_WRITE,
-                               MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK,
-                               -1, 0);
-            if (stack == MAP_FAILED)
-                throw ProcessException.newFromErrno("Failed to allocate child stack");
-
             extern (C) static int cloneChild(void* arguments) nothrow @nogc
             {
                 auto argv = cast(clone_args*) arguments;
@@ -626,6 +613,21 @@ private Pid spawnProcessImpl(scope const(char[])[] args,
                 assert(false);
             }
 
+            // Add a slack area for child's stack,
+            // just ported from glibc's posix_spawn.
+            size_t stackSize = (argz.length * (void*).sizeof) + 512;
+            stackSize += (32 * 1024);
+
+            // Align up.
+            immutable pageSize = sysconf(_SC_PAGESIZE);
+            stackSize = (stackSize + pageSize) & ~(pageSize - 1);
+
+            void* stack = mmap(null, stackSize, PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK,
+                               -1, 0);
+            if (stack == MAP_FAILED)
+                throw ProcessException.newFromErrno("Failed to allocate child stack");
+
             sigset_t all = void;
             sigset_t oldmask = void;
             int rc = sigfillset(&all);
@@ -646,17 +648,20 @@ private Pid spawnProcessImpl(scope const(char[])[] args,
             cArgs.forkPipeOut = forkPipe[1];
             cArgs.oldmask = oldmask;
 
-            id = clone(&cloneChild, stack + stackSize, CLONE_VM | CLONE_VFORK | SIGCHLD,
-                       cast(void*)&cArgs);
+            id = clone(&cloneChild, stack + stackSize,
+                       CLONE_VM | CLONE_VFORK | SIGCHLD,
+                       cast(void*) &cArgs);
+
+            rc = munmap(stack, stackSize);
+            if (rc != 0)
+                throw ProcessException.newFromErrno("Failed munmap()");
 
             rc = pthread_sigmask(SIG_SETMASK, &oldmask, null);
             if (rc != 0)
                 throw new ProcessException(text("Failed pthread_sigmask(): ", rc));
 
-            rc = munmap(stack, stackSize);
-            if (rc != 0)
-                throw ProcessException.newFromErrno("Failed munmap()");
-            assert(id != 0);
+            if (id == 0)
+                abort();
         }
         else
             id = core.sys.posix.unistd.fork();
@@ -810,7 +815,7 @@ private Pid spawnProcessImpl(scope const(char[])[] args,
         }
     }
 
-    // On linux, never comes here if clone() used.
+    // On linux, never comes here if clone(2) used.
     if (id == 0)
     {
         forkChild();
